@@ -1,11 +1,12 @@
 import "./App.css";
-import MainMenu from "./screens/MainMenu";
+import EditorMenu from "./screens/EditorMenu";
 
 function App() {
 
   return (
     <>
-      <MainMenu />;
+      {/* <MainMenu />; */}
+      <EditorMenu/>
     </>
   );
 }

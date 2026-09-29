@@ -3,7 +3,7 @@ export default function MainMenu() {
     return (
         <main className="flex h-full flex-col items-center justify-center gap-10">
         <header className="text-center">
-          <h1 className="text-5xl font-bold tracking-[0.3em]">BLOCKMODELS</h1>
+          <h1 className="text-5xl font-bold tracking-[0.3em]">BLACKMODELS</h1>
           <p className="mt-3 text-sm text-neutral-400">
             AI-powered Minecraft modeling
           </p>

@@ -279,7 +279,7 @@ BlockForge aims to provide a unified workflow:
 
 # License
 
-License information will be added before the first public release.
+MIT License 
 
 ---
 

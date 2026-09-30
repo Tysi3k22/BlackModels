@@ -129,11 +129,11 @@ Resource Pack / Plugin
 * [x] Three.js viewport
 * [x] Minecraft grid
 * [x] Camera controls
-* [ ] Cube creation
-* [ ] Cube deletion
-* [ ] Object selection
+* [x] Cube creation
+* [x] Cube deletion
+* [x] Object selection
 * [ ] Move / Rotate / Scale
-* [ ] Outliner
+* [x] Outliner
 * [ ] Undo / Redo
 * [ ] Project save/load
 

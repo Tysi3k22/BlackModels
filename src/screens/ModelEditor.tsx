@@ -1,12 +1,30 @@
+import { useEffect } from "react";
 import {Divider, PanelTitle, ToolButton} from "../components/Panel";
 import { ModelTools, useApp } from "../constants";
 import Viewport from "../components/Viewport";
+import Outliner from "../components/Outliner";
+import { useModel } from "../stores/modelStore";
 
 const tools: ModelTools[] = ["Select", "Move", "Rotate", "Scale"];
 
 export default function ModelEditor() {
     const modelTool = useApp((state) => state.modelTool);
     const setModelTool = useApp((state) => state.setModelTool);
+
+    const hasSelection = useModel((s) => s.selectedId !== null);
+    const addCube = useModel((s) => s.addCube);
+    const deleteSelected = useModel((s) => s.deleteSelected);
+
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Delete" || e.key === "Backspace") {
+                e.preventDefault();
+                deleteSelected();
+            }
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [deleteSelected]);
 
     return (
         <main className="flex min-h-0 w-full flex-1 flex-row items-stretch justify-start">
@@ -22,6 +40,21 @@ export default function ModelEditor() {
                 ))}
                 <Divider />
 
+                <div className="mt-auto flex flex-col gap-1.5 p-2">
+                    <button
+                        onClick={addCube}
+                        className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-black transition-[filter] hover:brightness-110"
+                    >
+                        + Add Cube
+                    </button>
+                    <button
+                        onClick={deleteSelected}
+                        disabled={!hasSelection}
+                        className="rounded px-3 py-1.5 text-left text-sm text-red-400 transition-colors hover:bg-red-500/10 disabled:pointer-events-none disabled:opacity-30"
+                    >
+                        Delete selected
+                    </button>
+                </div>
             </div>
 
 
@@ -30,7 +63,7 @@ export default function ModelEditor() {
             </div>
 
             <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col border-l border-border">
-                <PanelTitle>Hierarchy</PanelTitle>
+                <Outliner />
             </div>
         </main>
     )

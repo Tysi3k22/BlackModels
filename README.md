@@ -126,9 +126,9 @@ Resource Pack / Plugin
 
 * [x] Tauri desktop application
 * [x] React + TypeScript setup
-* [ ] Three.js viewport
-* [ ] Minecraft grid
-* [ ] Camera controls
+* [x] Three.js viewport
+* [x] Minecraft grid
+* [x] Camera controls
 * [ ] Cube creation
 * [ ] Cube deletion
 * [ ] Object selection

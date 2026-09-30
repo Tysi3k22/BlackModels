@@ -8,6 +8,7 @@ export const BB_MARKER_COLORS = [
 
 /** Palette used for auto-coloring newly created cubes. */
 const CUBE_COLORS = ["#b7c0cc", "#8fb7e8", "#a8d8a8", "#e8cf8f", "#d8a8b8"];
+const BONE_COLORS = ["#e8b968", "#b9a0e8", "#68d4b9", "#e87979", "#79b1e8"];
 
 export type Vec3 = [number, number, number];
 export type FaceName = "north" | "east" | "south" | "west" | "up" | "down";
@@ -38,6 +39,27 @@ export interface Cube {
   /** Marker color index (bbmodel `color`). */
   marker?: number;
   color: string;
+  /** Parent bone id, or null for model root. */
+  boneId: string | null;
+  /** When true the cube is not drawn in the viewport. */
+  hidden?: boolean;
+}
+
+/** A bone (bbmodel outliner group): a named pivot that cubes and other bones attach to. */
+export interface Bone {
+  id: string;
+  name: string;
+  /** Pivot point in model space (bbmodel `origin`). */
+  origin: Vec3;
+  /** Rotation in degrees around origin (XYZ order). */
+  rotation: Vec3;
+  /** Parent bone id, or null for model root. */
+  parentId: string | null;
+  /** Marker color index (bbmodel `color`). */
+  marker?: number;
+  color: string;
+  /** When true the bone and everything under it is not drawn. */
+  hidden?: boolean;
 }
 
 export interface ProjectTexture {
@@ -46,71 +68,122 @@ export interface ProjectTexture {
   name: string;
 }
 
+export type SelectedKind = "cube" | "bone";
+
 interface HistoryEntry {
   cubes: Cube[];
+  bones: Bone[];
   selectedId: string | null;
-}
-
-interface ModelState {
-  name: string;
-  cubes: Cube[];
-  textures: ProjectTexture[];
-  /** Texture resolution in pixels (e.g. [256, 256]). */
-  resolution: [number, number];
-  selectedId: string | null;
-  past: HistoryEntry[];
-  future: HistoryEntry[];
-  addCube: () => void;
-  deleteSelected: () => void;
-  select: (id: string | null) => void;
-  /** Snapshot before a drag starts, so the whole drag is one undo step. */
-  beginTransform: () => void;
-  setTransform: (t: TransformUpdate) => void;
-  undo: () => void;
-  redo: () => void;
-  /** Replace the whole model (project load / new project). */
-  importProject: (data: {
-    name?: string;
-    cubes: Cube[];
-    textures?: ProjectTexture[];
-    resolution?: [number, number];
-  }) => void;
+  selectedKind: SelectedKind | null;
 }
 
 export interface TransformUpdate {
   from: Vec3;
   to: Vec3;
   rotation?: Vec3;
+  /** New pivot position (move the pivot together with the cube). */
+  origin?: Vec3;
+}
+
+export interface BoneTransformUpdate {
+  origin: Vec3;
+  rotation: Vec3;
+}
+
+interface ModelState {
+  name: string;
+  cubes: Cube[];
+  bones: Bone[];
+  textures: ProjectTexture[];
+  /** Texture resolution in pixels (e.g. [256, 256]). */
+  resolution: [number, number];
+  selectedId: string | null;
+  selectedKind: SelectedKind | null;
+  past: HistoryEntry[];
+  future: HistoryEntry[];
+  addCube: () => void;
+  addBone: (parentId?: string | null) => void;
+  deleteSelected: () => void;
+  select: (id: string | null, kind?: SelectedKind | null) => void;
+  /** Snapshot before a drag starts, so the whole drag is one undo step. */
+  beginTransform: () => void;
+  setTransform: (t: TransformUpdate) => void;
+  setBoneTransform: (t: BoneTransformUpdate) => void;
+  setCubeParent: (cubeId: string, boneId: string | null) => void;
+  setBoneParent: (boneId: string, parentId: string | null) => void;
+  /** Show/hide one cube or bone (a hidden bone hides its whole subtree). */
+  toggleHidden: (id: string, kind: SelectedKind) => void;
+  /** Make every cube and bone visible again. */
+  showAll: () => void;
+  undo: () => void;
+  redo: () => void;
+  /** Replace the whole model (project load / new project). */
+  importProject: (data: {
+    name?: string;
+    cubes: Cube[];
+    bones?: Bone[];
+    textures?: ProjectTexture[];
+    resolution?: [number, number];
+  }) => void;
 }
 
 const HISTORY_LIMIT = 100;
 
-const snapshot = (s: { cubes: Cube[]; selectedId: string | null }): HistoryEntry => ({
+const snapshot = (s: {
+  cubes: Cube[];
+  bones: Bone[];
+  selectedId: string | null;
+  selectedKind: SelectedKind | null;
+}): HistoryEntry => ({
   cubes: s.cubes,
+  bones: s.bones,
   selectedId: s.selectedId,
+  selectedKind: s.selectedKind,
 });
 
-const nextCubeId = (cubes: Cube[]): string => {
-  const max = cubes.reduce((m, c) => {
-    const n = parseInt(c.id.replace("cube-", ""), 10);
+const maxIdNumber = (ids: string[], prefix: string): number =>
+  ids.reduce((m, id) => {
+    const n = parseInt(id.replace(prefix, ""), 10);
     return Number.isNaN(n) ? m : Math.max(m, n);
   }, 0);
-  return `cube-${max + 1}`;
-};
+
+/** All bone ids that would become invalid if `removed` (incl. itself). */
+function descendantBoneIds(bones: Bone[], removed: string): Set<string> {
+  const byParent = new Map<string | null, string[]>();
+  for (const b of bones) {
+    const list = byParent.get(b.parentId) ?? [];
+    list.push(b.id);
+    byParent.set(b.parentId, list);
+  }
+  const out = new Set<string>([removed]);
+  const queue = [removed];
+  while (queue.length) {
+    const cur = queue.pop() as string;
+    for (const child of byParent.get(cur) ?? []) {
+      if (!out.has(child)) {
+        out.add(child);
+        queue.push(child);
+      }
+    }
+  }
+  return out;
+}
 
 export const useModel = create<ModelState>((set, get) => ({
   name: "Untitled",
   cubes: [],
+  bones: [],
   textures: [],
   resolution: [256, 256],
   selectedId: null,
+  selectedKind: null,
   past: [],
   future: [],
 
   addCube: () =>
     set((state) => {
-      const id = nextCubeId(state.cubes);
-      const n = parseInt(id.replace("cube-", ""), 10);
+      const n = maxIdNumber(state.cubes.map((c) => c.id), "cube-") + 1;
+      const id = `cube-${n}`;
       const row = state.cubes.length;
       const cube: Cube = {
         id,
@@ -121,24 +194,71 @@ export const useModel = create<ModelState>((set, get) => ({
         rotation: [0, 0, 0],
         color: CUBE_COLORS[(n - 1) % CUBE_COLORS.length],
         marker: 0,
+        boneId: state.selectedKind === "bone" ? state.selectedId : null,
       };
       return {
         past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
         future: [],
         cubes: [...state.cubes, cube],
         selectedId: id,
+        selectedKind: "cube" as const,
+      };
+    }),
+
+  addBone: (parentId) =>
+    set((state) => {
+      const n = maxIdNumber(state.bones.map((b) => b.id), "bone-") + 1;
+      const id = `bone-${n}`;
+      // New bone pivots at the parent's origin (or model origin) so it starts
+      // as a clean joint; the pivot can then be moved with the gizmo.
+      const parent = state.bones.find((b) => b.id === (parentId ?? state.selectedId));
+      const origin: Vec3 = parent ? [...parent.origin] : [0, 0, 0];
+      const bone: Bone = {
+        id,
+        name: `Bone ${n}`,
+        origin,
+        rotation: [0, 0, 0],
+        parentId: parent ? parent.id : null,
+        marker: n % BB_MARKER_COLORS.length,
+        color: BONE_COLORS[(n - 1) % BONE_COLORS.length],
+      };
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        bones: [...state.bones, bone],
+        selectedId: id,
+        selectedKind: "bone" as const,
       };
     }),
 
   deleteSelected: () =>
-    set((state) => ({
-      past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
-      future: [],
-      cubes: state.cubes.filter((c) => c.id !== state.selectedId),
-      selectedId: null,
-    })),
+    set((state) => {
+      if (!state.selectedId) return {};
+      if (state.selectedKind === "bone") {
+        const gone = descendantBoneIds(state.bones, state.selectedId);
+        return {
+          past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+          future: [],
+          bones: state.bones.filter((b) => !gone.has(b.id)),
+          // Cubes under removed bones fall back to the model root
+          cubes: state.cubes.map((c) =>
+            c.boneId && gone.has(c.boneId) ? { ...c, boneId: null } : c
+          ),
+          selectedId: null,
+          selectedKind: null,
+        };
+      }
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        cubes: state.cubes.filter((c) => c.id !== state.selectedId),
+        selectedId: null,
+        selectedKind: null,
+      };
+    }),
 
-  select: (selectedId) => set({ selectedId }),
+  select: (selectedId, selectedKind) =>
+    set({ selectedId, selectedKind: selectedId ? (selectedKind ?? "cube") : null }),
 
   beginTransform: () =>
     set((state) => ({
@@ -148,9 +268,55 @@ export const useModel = create<ModelState>((set, get) => ({
 
   setTransform: (t) =>
     set((state) => ({
-      cubes: state.cubes.map((c) =>
-        c.id === state.selectedId ? { ...c, ...t } : c
+      cubes: state.cubes.map((c) => {
+        if (c.id !== state.selectedId || state.selectedKind !== "cube") return c;
+        return { ...c, ...t, origin: t.origin ?? c.origin };
+      }),
+    })),
+
+  setBoneTransform: (t) =>
+    set((state) => ({
+      bones: state.bones.map((b) =>
+        b.id === state.selectedId && state.selectedKind === "bone" ? { ...b, ...t } : b
       ),
+    })),
+
+  setCubeParent: (cubeId, boneId) =>
+    set((state) => {
+      const cube = state.cubes.find((c) => c.id === cubeId);
+      if (!cube || cube.boneId === boneId) return {};
+      if (boneId && !state.bones.some((b) => b.id === boneId)) return {};
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        cubes: state.cubes.map((c) => (c.id === cubeId ? { ...c, boneId } : c)),
+      };
+    }),
+
+  setBoneParent: (boneId, parentId) =>
+    set((state) => {
+      if (boneId === parentId) return {};
+      if (parentId && !state.bones.some((b) => b.id === parentId)) return {};
+      // Reject cycles: parentId must not be a descendant of boneId
+      if (parentId && descendantBoneIds(state.bones, boneId).has(parentId)) return {};
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        bones: state.bones.map((b) => (b.id === boneId ? { ...b, parentId } : b)),
+      };
+    }),
+
+  toggleHidden: (id, kind) =>
+    set((state) =>
+      kind === "bone"
+        ? { bones: state.bones.map((b) => (b.id === id ? { ...b, hidden: !b.hidden } : b)) }
+        : { cubes: state.cubes.map((c) => (c.id === id ? { ...c, hidden: !c.hidden } : c)) }
+    ),
+
+  showAll: () =>
+    set((state) => ({
+      bones: state.bones.map((b) => (b.hidden ? { ...b, hidden: false } : b)),
+      cubes: state.cubes.map((c) => (c.hidden ? { ...c, hidden: false } : c)),
     })),
 
   undo: () => {
@@ -161,7 +327,9 @@ export const useModel = create<ModelState>((set, get) => ({
       past: state.past.slice(0, -1),
       future: [...state.future, snapshot(state)],
       cubes: prev.cubes,
+      bones: prev.bones,
       selectedId: prev.selectedId,
+      selectedKind: prev.selectedKind,
     });
   },
 
@@ -173,7 +341,9 @@ export const useModel = create<ModelState>((set, get) => ({
       future: state.future.slice(0, -1),
       past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
       cubes: next.cubes,
+      bones: next.bones,
       selectedId: next.selectedId,
+      selectedKind: next.selectedKind,
     });
   },
 
@@ -183,11 +353,44 @@ export const useModel = create<ModelState>((set, get) => ({
       future: [],
       name: data.name ?? "Untitled",
       cubes: data.cubes,
+      bones: data.bones ?? [],
       textures: data.textures ?? [],
       resolution: data.resolution ?? [256, 256],
       selectedId: null,
+      selectedKind: null,
     }),
 }));
 
 export const selectSelectedCube = (state: ModelState) =>
-  state.cubes.find((c) => c.id === state.selectedId) ?? null;
+  state.selectedKind === "cube"
+    ? state.cubes.find((c) => c.id === state.selectedId) ?? null
+    : null;
+
+// Dev-only hook for live testing / debugging in the browser
+if (import.meta.env.DEV) {
+  (window as unknown as { __model?: typeof useModel }).__model = useModel;
+}
+
+export const selectSelectedBone = (state: ModelState) =>
+  state.selectedKind === "bone"
+    ? state.bones.find((b) => b.id === state.selectedId) ?? null
+    : null;
+
+/** Ordered list of a bone's ancestors (immediate parent first). */
+export function boneAncestors(bones: Bone[], id: string | null): Bone[] {
+  const byId = new Map(bones.map((b) => [b.id, b]));
+  const out: Bone[] = [];
+  let cur = id ? byId.get(id) ?? null : null;
+  let guard = 0;
+  while (cur && guard++ < 100) {
+    out.push(cur);
+    cur = cur.parentId ? byId.get(cur.parentId) ?? null : null;
+  }
+  return out;
+}
+
+/** True if the cube itself or any bone above it is hidden. */
+export function isCubeHidden(cube: Cube, bones: Bone[]): boolean {
+  if (cube.hidden) return true;
+  return boneAncestors(bones, cube.boneId).some((b) => b.hidden);
+}

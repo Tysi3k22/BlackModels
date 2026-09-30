@@ -2,6 +2,7 @@ import { openTextFile, saveTextFile } from "./files";
 import { pushRecent } from "./recent";
 import {
   BB_MARKER_COLORS,
+  Bone,
   Cube,
   CubeFaces,
   FaceName,
@@ -34,6 +35,21 @@ interface BbElement {
   rescale?: boolean;
   locked?: boolean;
   autouv?: number;
+  visibility?: boolean;
+}
+
+interface BbGroup {
+  name: string;
+  origin: Vec3;
+  rotation?: Vec3;
+  color?: number;
+  uuid?: string;
+  export?: boolean;
+  isOpen?: boolean;
+  locked?: boolean;
+  visibility?: boolean;
+  autouv?: number;
+  children: (string | BbGroup)[];
 }
 
 interface BbTexture {
@@ -57,7 +73,15 @@ interface BbModel {
 
 const FACE_ORDER: FaceName[] = ["north", "east", "south", "west", "up", "down"];
 
-function toCube(el: BbElement, index: number): Cube {
+interface ParsedModel {
+  name: string;
+  cubes: Cube[];
+  bones: Bone[];
+  textures: ProjectTexture[];
+  resolution: [number, number];
+}
+
+function toCube(el: BbElement, index: number, boneId: string | null): Cube {
   return {
     id: el.uuid ?? `cube-${index + 1}`,
     name: el.name || `Cube ${index + 1}`,
@@ -73,22 +97,59 @@ function toCube(el: BbElement, index: number): Cube {
     marker: el.color,
     color: BB_MARKER_COLORS[((el.color ?? 0) % BB_MARKER_COLORS.length + BB_MARKER_COLORS.length) % BB_MARKER_COLORS.length],
     faces: el.faces as CubeFaces | undefined,
+    boneId,
+    hidden: el.visibility === false ? true : undefined,
   };
 }
 
-export function parseBbmodel(json: string): {
-  name: string;
-  cubes: Cube[];
-  textures: ProjectTexture[];
-  resolution: [number, number];
-} {
+export function parseBbmodel(json: string): ParsedModel {
   const data = JSON.parse(json) as BbModel;
   if (!data || !Array.isArray(data.elements)) {
     throw new Error("Not a valid .bbmodel file");
   }
+
+  // Walk the outliner tree: groups become bones, strings are cube uuids
+  const bones: Bone[] = [];
+  const boneIdByUuid = new Map<string, string>(); // bb uuid -> bone id
+  const cubeParent = new Map<string, string | null>(); // cube uuid -> bone id
+
+  const usedIds = new Set<string>();
+  const boneIdFor = (bbUuid: string): string => {
+    let id = bbUuid;
+    if (usedIds.has(id)) id = `${bbUuid}-${usedIds.size}`;
+    usedIds.add(id);
+    return id;
+  };
+
+  const walk = (nodes: unknown[], parentBoneId: string | null) => {
+    for (const node of nodes) {
+      if (typeof node === "string") {
+        cubeParent.set(node, parentBoneId);
+        continue;
+      }
+      const g = node as BbGroup;
+      if (!g || typeof g !== "object" || !Array.isArray(g.children)) continue;
+      const id = boneIdFor(g.uuid ?? `bone-${bones.length + 1}`);
+      boneIdByUuid.set(g.uuid ?? id, id);
+      bones.push({
+        id,
+        name: g.name || "Group",
+        origin: g.origin ?? [0, 0, 0],
+        rotation: g.rotation ?? [0, 0, 0],
+        parentId: parentBoneId,
+        marker: g.color,
+        color: BB_MARKER_COLORS[((g.color ?? 0) % BB_MARKER_COLORS.length + BB_MARKER_COLORS.length) % BB_MARKER_COLORS.length],
+        hidden: g.visibility === false ? true : undefined,
+      });
+      walk(g.children, id);
+    }
+  };
+  walk(data.outliner ?? [], null);
+
   const cubes = data.elements
     .filter((el) => el.type === "cube" || Array.isArray(el.from))
-    .map(toCube);
+    .map((el, i) => toCube(el, i, cubeParent.get(el.uuid ?? "") ?? null));
+
   const textures: ProjectTexture[] = (data.textures ?? [])
     .filter((t) => typeof t.source === "string" && t.source.startsWith("data:"))
     .map((t, i) => ({ source: t.source as string, name: t.name ?? `texture-${i}.png` }));
@@ -98,6 +159,7 @@ export function parseBbmodel(json: string): {
   return {
     name: data.name || "Imported model",
     cubes,
+    bones,
     textures,
     resolution,
   };
@@ -127,6 +189,7 @@ function toBbElement(cube: Cube): BbElement {
     color: cube.marker ?? 0,
     faces: {} as Record<FaceName, BbFace>,
     type: "cube",
+    visibility: cube.hidden ? false : undefined,
     uuid: cube.id.includes("-") ? cube.id : randomUuid(),
   };
   if (cube.inflate !== undefined) el.inflate = cube.inflate;
@@ -163,12 +226,60 @@ function randomUuid(): string {
   return u;
 }
 
+function toBbGroup(bone: Bone, cubeUuids: string[], childGroups: BbGroup[]): BbGroup {
+  return {
+    name: bone.name,
+    origin: bone.origin,
+    rotation: bone.rotation.some((r) => r !== 0) ? bone.rotation : undefined,
+    color: bone.marker ?? 0,
+    uuid: bone.id.includes("-") ? bone.id : randomUuid(),
+    export: true,
+    isOpen: true,
+    locked: false,
+    visibility: !bone.hidden,
+    autouv: 0,
+    children: [...cubeUuids, ...childGroups],
+  };
+}
+
 export function serializeBbmodel(
   name: string,
   cubes: Cube[],
+  bones: Bone[],
   textures: ProjectTexture[],
   resolution: [number, number]
 ): string {
+  const elements = cubes.map(toBbElement);
+
+  // Group cube element uuids under their bones
+  const cubesByBone = new Map<string | null, string[]>();
+  cubes.forEach((c, i) => {
+    const key = c.boneId && bones.some((b) => b.id === c.boneId) ? c.boneId : null;
+    const list = cubesByBone.get(key) ?? [];
+    list.push(elements[i].uuid as string);
+    cubesByBone.set(key, list);
+  });
+
+  const groupByBoneId = new Map<string, BbGroup>();
+  const buildGroup = (bone: Bone): BbGroup => {
+    const cached = groupByBoneId.get(bone.id);
+    if (cached) return cached;
+    const childBones = bones.filter((b) => b.parentId === bone.id);
+    const g = toBbGroup(
+      bone,
+      cubesByBone.get(bone.id) ?? [],
+      childBones.map(buildGroup)
+    );
+    groupByBoneId.set(bone.id, g);
+    return g;
+  };
+
+  const rootBones = bones.filter((b) => !b.parentId || !bones.some((x) => x.id === b.parentId));
+  const outliner: (string | BbGroup)[] = [
+    ...(cubesByBone.get(null) ?? []),
+    ...rootBones.map(buildGroup),
+  ];
+
   const model: BbModel = {
     meta: {
       format_version: "4.0",
@@ -181,7 +292,8 @@ export function serializeBbmodel(
     variable_placeholder_buttons: [],
     timeline_setups: [],
     resolution: { width: resolution[0], height: resolution[1] },
-    elements: cubes.map(toBbElement),
+    elements,
+    outliner,
     textures: textures.map((t) => ({
       path: t.name,
       name: t.name,
@@ -201,15 +313,13 @@ export function serializeBbmodel(
   // Undefined fields are dropped and defaults restored for the JSON output
   const clean = JSON.parse(JSON.stringify(model)) as BbModel;
   clean.visible_box = [1, 1, 0];
-  // Outliner references element uuids at the root level
-  clean.outliner = (clean.elements as BbElement[]).map((e) => e.uuid);
   return JSON.stringify(clean, null, 2);
 }
 
 export async function exportBbmodel(): Promise<boolean> {
-  const { name, cubes, textures, resolution } = useModel.getState();
+  const { name, cubes, bones, textures, resolution } = useModel.getState();
   const safeName = (name || "model").replace(/[^\w\- ]+/g, "_");
-  const contents = serializeBbmodel(name, cubes, textures, resolution);
+  const contents = serializeBbmodel(name, cubes, bones, textures, resolution);
   const saved = await saveTextFile({
     defaultName: `${safeName}.${BB_EXTENSION}`,
     filters: [BB_FILTER],

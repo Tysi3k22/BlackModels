@@ -10,13 +10,17 @@ const tools: ModelTools[] = ["Select", "Move", "Rotate", "Scale"];
 export default function ModelEditor() {
     const modelTool = useApp((state) => state.modelTool);
     const setModelTool = useApp((state) => state.setModelTool);
+    const showPivots = useApp((state) => state.showPivots);
+    const setShowPivots = useApp((state) => state.setShowPivots);
 
     const hasSelection = useModel((s) => s.selectedId !== null);
     const addCube = useModel((s) => s.addCube);
+    const addBone = useModel((s) => s.addBone);
     const deleteSelected = useModel((s) => s.deleteSelected);
     const modelName = useModel((s) => s.name);
     const textures = useModel((s) => s.textures);
     const cubesCount = useModel((s) => s.cubes.length);
+    const bonesCount = useModel((s) => s.bones.length);
 
     const undo = useModel((s) => s.undo);
     const redo = useModel((s) => s.redo);
@@ -53,9 +57,19 @@ export default function ModelEditor() {
                 ))}
                 <Divider />
 
+                <label className="flex cursor-pointer items-center gap-2 px-3 py-1 text-xs text-neutral-300 select-none hover:text-white">
+                    <input
+                        type="checkbox"
+                        checked={showPivots}
+                        onChange={(e) => setShowPivots(e.target.checked)}
+                        className="accent-[var(--color-accent,#4ea1ff)]"
+                    />
+                    Show pivots
+                </label>
+
                 <div className="px-3 pb-2 pt-1 text-[11px] leading-5 text-neutral-500">
                     <div className="font-semibold tracking-widest text-neutral-400">{modelName}</div>
-                    <div>{cubesCount} cubes</div>
+                    <div>{cubesCount} cubes · {bonesCount} bones</div>
                     {textures.length > 0 && <div>{textures.length} texture(s) embedded</div>}
                 </div>
 
@@ -65,6 +79,13 @@ export default function ModelEditor() {
                         className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-black transition-[filter] hover:brightness-110"
                     >
                         + Add Cube
+                    </button>
+                    <button
+                        onClick={() => addBone()}
+                        title="Adds a bone under the selected bone (or at the model root)"
+                        className="rounded border border-border px-3 py-1.5 text-left text-sm text-neutral-200 transition-colors hover:bg-panel-2"
+                    >
+                        + Add Bone
                     </button>
                     <button
                         onClick={deleteSelected}

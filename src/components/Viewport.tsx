@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import {
   Edges,
   GizmoHelper,
@@ -12,8 +12,17 @@ import * as THREE from "three";
 import type { Object3D } from "three";
 import type { TransformControls as TransformControlsImpl } from "three-stdlib";
 import { useApp } from "../constants";
-import { Cube, CubeFaces, Vec3, useModel } from "../stores/modelStore";
-import { selectSelectedCube } from "../stores/modelStore";
+import {
+  Bone,
+  Cube,
+  CubeFaces,
+  Vec3,
+  isCubeHidden,
+  boneAncestors,
+  selectSelectedBone,
+  selectSelectedCube,
+  useModel,
+} from "../stores/modelStore";
 
 // Minecraft coordinate system: +X = East, +Y = Up, +Z = South
 // 1 grid cell = 1 in-game pixel, 1 section (16 cells) = 1 Minecraft block
@@ -30,6 +39,11 @@ const isGizmoBusy = () =>
   (gizmo.controls as unknown as { axis: string | null } | null)?.axis != null;
 
 const DEG = Math.PI / 180;
+
+// Blockbench applies group/cube rotations (degrees) in Z-Y-X order.
+const ROT_ORDER = "ZYX" as const;
+const eulerDeg = (r: Vec3) =>
+  new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, ROT_ORDER);
 
 // Shared texture cache: one THREE.Texture per unique embedded image
 const textureCache = new Map<string, THREE.Texture>();
@@ -52,6 +66,7 @@ function getSharedTexture(source: string): THREE.Texture | null {
 // BoxGeometry face order: px, nx, py, ny, pz, nz
 // Minecraft/bbmodel: east=+X, west=-X, up=+Y, down=-Y, south=+Z, north=-Z
 const BOX_FACE_ORDER = ["east", "west", "up", "down", "south", "north"] as const;
+
 /**
  * Rewrites a BoxGeometry's UVs so each face samples its bbmodel face UV
  * rectangle (given in texture pixels, y-down).
@@ -90,29 +105,93 @@ function inflateBox(from: Vec3, to: Vec3, inflate?: number): [Vec3, Vec3] {
   ];
 }
 
-/**
- * One model cube. Rendered as a group positioned at the pivot (origin) with
- * rotation applied to the group, and the mesh offset relative to the pivot —
- * this matches bbmodel semantics (rotation happens around `origin`).
- */
-function CubeObject({ cube }: { cube: Cube }) {
-  const selected = useModel((s) => s.selectedId === cube.id);
-  const select = useModel((s) => s.select);
-  const textures = useModel((s) => s.textures);
-  const resolution = useModel((s) => s.resolution);
+function cubeMaterial(cube: {
+  color: string;
+  faces?: CubeFaces;
+  inflate?: number;
+  from: Vec3;
+  to: Vec3;
+}, tex: THREE.Texture | null) {
+  const hasFaceUVs =
+    !!cube.faces &&
+    Object.values(cube.faces).some(
+      (f) => f?.uv && (f.uv[0] !== f.uv[2] || f.uv[1] !== f.uv[3])
+    );
   const [fx, fy, fz] = cube.from;
   const [tx, ty, tz] = cube.to;
-  const origin = cube.origin ?? [(fx + tx) / 2, (fy + ty) / 2, (fz + tz) / 2];
+  const zeroThickness = tx - fx === 0 || ty - fy === 0 || tz - fz === 0;
+  if (tex && hasFaceUVs) {
+    return (
+      <meshStandardMaterial
+        map={tex}
+        side={zeroThickness ? THREE.DoubleSide : THREE.FrontSide}
+        transparent
+        alphaTest={0.01}
+      />
+    );
+  }
+  return <meshStandardMaterial color={cube.color} transparent opacity={0.9} />;
+}
+
+/** Cube geometry with per-face UVs from bbmodel data. */
+function useCubeGeometry(
+  cube: Cube,
+  tex: THREE.Texture | null,
+  resolution: [number, number]
+): THREE.BoxGeometry {
+  return useMemo(() => {
+    const g = new THREE.BoxGeometry(1, 1, 1);
+    if (tex) {
+      const hasFaceUVs =
+        !!cube.faces &&
+        Object.values(cube.faces).some(
+          (f) => f?.uv && (f.uv[0] !== f.uv[2] || f.uv[1] !== f.uv[3])
+        );
+      if (hasFaceUVs) applyFaceUVs(g, cube.faces, resolution);
+    }
+    return g;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tex?.uuid, cube.faces, resolution[0], resolution[1]]);
+}
+
+/**
+ * Non-selected cube. Lives inside its bone's group, whose origin is the bone
+ * pivot. bbmodel semantics: the cube frame is T(cubeOrigin - bonePivot) ·
+ * R(cubeRotation), and the box sits at (center - cubeOrigin) inside it.
+ */
+function CubeObject({
+  cube,
+  offset,
+  depth,
+  tex,
+  resolution,
+}: {
+  cube: Cube;
+  /** Bone pivot in model space (omit for root cubes). */
+  offset?: Vec3;
+  depth: number;
+  tex: THREE.Texture | null;
+  resolution: [number, number];
+}) {
+  const select = useModel((s) => s.select);
+  const selectedId = useModel((s) => s.selectedId);
+  const bones = useModel((s) => s.bones);
   const [ifrom, ito] = useMemo(
     () => inflateBox(cube.from, cube.to, cube.inflate),
     [cube.from, cube.to, cube.inflate]
   );
+  const geometry = useCubeGeometry(cube, tex, resolution);
 
-  // Mesh position relative to the pivot
+  // The selected cube is drawn by <SelectedCube/> (with gizmo) instead
+  if (cube.id === selectedId || isCubeHidden(cube, bones)) return null;
+
+  const pivot: Vec3 = offset ?? [0, 0, 0];
+  const o: Vec3 = cube.origin;
+  const groupPos: Vec3 = [o[0] - pivot[0], o[1] - pivot[1], o[2] - pivot[2]];
   const meshPos: Vec3 = [
-    (ifrom[0] + ito[0]) / 2 - origin[0],
-    (ifrom[1] + ito[1]) / 2 - origin[1],
-    (ifrom[2] + ito[2]) / 2 - origin[2],
+    (ifrom[0] + ito[0]) / 2 - o[0],
+    (ifrom[1] + ito[1]) / 2 - o[1],
+    (ifrom[2] + ito[2]) / 2 - o[2],
   ];
   const size: Vec3 = [
     Math.max(1e-6, ito[0] - ifrom[0]),
@@ -120,58 +199,157 @@ function CubeObject({ cube }: { cube: Cube }) {
     Math.max(1e-6, ito[2] - ifrom[2]),
   ];
 
-  const tex = textures.length > 0 ? getSharedTexture(textures[0].source) : null;
-  const hasFaceUVs =
-    !!cube.faces && Object.values(cube.faces).some((f) => f?.uv && (f.uv[0] !== f.uv[2] || f.uv[1] !== f.uv[3]));
-
-  const geometry = useMemo(() => {
-    const g = new THREE.BoxGeometry(1, 1, 1);
-    if (tex && hasFaceUVs) applyFaceUVs(g, cube.faces, resolution);
-    return g;
-  }, [tex?.uuid, cube.faces, resolution[0], resolution[1]]);
-
-  const zeroThickness =
-    tx - fx === 0 || ty - fy === 0 || tz - fz === 0;
-
   return (
     <group
-      position={origin}
-      rotation={[cube.rotation[0] * DEG, cube.rotation[1] * DEG, cube.rotation[2] * DEG]}
+      position={groupPos}
+      rotation={eulerDeg(cube.rotation)}
       onClick={(e) => {
         e.stopPropagation();
-        select(cube.id);
+        select(cube.id, "cube");
       }}
     >
-      <mesh position={meshPos} scale={size} geometry={geometry}>
-        {tex && hasFaceUVs ? (
-          <meshStandardMaterial
-            map={tex}
-            side={zeroThickness ? THREE.DoubleSide : THREE.FrontSide}
-            transparent
-            alphaTest={0.01}
-          />
-        ) : (
-          <meshStandardMaterial color={cube.color} transparent opacity={0.9} />
-        )}
-        {selected && <Edges color="#4ea1ff" lineWidth={2} />}
+      <mesh position={meshPos} scale={size} geometry={geometry} userData={{ clickCube: cube.id, depth }}>
+        {cubeMaterial(cube, tex)}
       </mesh>
     </group>
   );
 }
 
 /**
- * The selected cube rendered as an editable rig: group at pivot (translate +
- * rotate gizmos act on this) with the mesh inside (scale gizmo acts on it).
+ * Accumulated world (model-space) matrix of a bone in the rig hierarchy:
+ * W(bone) = W(parent) · T(origin − parentOrigin) · R(rotation). Identity for
+ * a null bone (model root). Verified against Blockbench semantics.
+ */
+function boneWorldMatrix(bones: Bone[], boneId: string | null): THREE.Matrix4 {
+  const byId = new Map(bones.map((b) => [b.id, b]));
+  const chain: Bone[] = [];
+  let cur = boneId ? byId.get(boneId) ?? null : null;
+  while (cur) {
+    chain.push(cur);
+    cur = cur.parentId ? byId.get(cur.parentId) ?? null : null;
+  }
+  const m = new THREE.Matrix4();
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const b = chain[i];
+    const parent = i + 1 < chain.length ? chain[i + 1] : null;
+    const rel: Vec3 = parent
+      ? [b.origin[0] - parent.origin[0], b.origin[1] - parent.origin[1], b.origin[2] - parent.origin[2]]
+      : b.origin;
+    m.multiply(
+      new THREE.Matrix4().compose(
+        new THREE.Vector3(...rel),
+        new THREE.Quaternion().setFromEuler(eulerDeg(b.rotation)),
+        new THREE.Vector3(1, 1, 1)
+      )
+    );
+  }
+  return m;
+}
+
+/**
+ * A bone: nested group with the bone's pivot transform. Cubes under the bone
+ * are model-space and are simply added as children (three composes the
+ * hierarchy matrices). Child bones recurse.
+ */
+function BoneNode({
+  bone,
+  allCubes,
+  allBones,
+  depth,
+  tex,
+  resolution,
+}: {
+  bone: Bone;
+  allCubes: Cube[];
+  allBones: Bone[];
+  depth: number;
+  tex: THREE.Texture | null;
+  resolution: [number, number];
+}) {
+  const select = useModel((s) => s.select);
+  const showPivots = useApp((s) => s.showPivots);
+  const childBones = useMemo(
+    () => allBones.filter((b) => b.parentId === bone.id),
+    [allBones, bone.id]
+  );
+  const boneCubes = useMemo(
+    () => allCubes.filter((c) => c.boneId === bone.id),
+    [allCubes, bone.id]
+  );
+  // Bones use relative position to the parent's pivot (or absolute for roots)
+  // and the full rotation from the file — the verified bbmodel semantics.
+  const parent = allBones.find((b) => b.id === bone.parentId);
+  const relPos: Vec3 = parent
+    ? [bone.origin[0] - parent.origin[0], bone.origin[1] - parent.origin[1], bone.origin[2] - parent.origin[2]]
+    : bone.origin;
+
+  if (bone.hidden) return null;
+
+  return (
+    <group position={relPos} rotation={eulerDeg(bone.rotation)}>
+      {/* Pivot markers: hidden by default (toggle in UI) */}
+      {showPivots && (
+        <>
+          <mesh
+            userData={{ clickBone: bone.id, depth }}
+            onClick={(e) => {
+              e.stopPropagation();
+              select(bone.id, "bone");
+            }}
+          >
+            <octahedronGeometry args={[0.75, 0]} />
+            <meshBasicMaterial color={bone.color} wireframe />
+          </mesh>
+          <mesh
+            position={[0, -1.6, 0]}
+            userData={{ clickBone: bone.id, depth }}
+            onClick={(e) => {
+              e.stopPropagation();
+              select(bone.id, "bone");
+            }}
+          >
+            <cylinderGeometry args={[0.12, 0.12, 2.4, 6]} />
+            <meshBasicMaterial color={bone.color} transparent opacity={0.6} />
+          </mesh>
+        </>
+      )}
+
+      {/* Cube coords are model-space; CubeObject subtracts the bone pivot
+          because this group's origin already sits on the pivot. */}
+      {boneCubes.map((cube) => (
+        <CubeObject key={cube.id} cube={cube} offset={bone.origin} depth={depth + 1} tex={tex} resolution={resolution} />
+      ))}
+      {childBones.map((child) => (
+        <BoneNode
+          key={child.id}
+          bone={child}
+          allCubes={allCubes}
+          allBones={allBones}
+          depth={depth + 1}
+          tex={tex}
+          resolution={resolution}
+        />
+      ))}
+    </group>
+  );
+}
+
+/**
+ * The selected cube rendered as an editable rig. The rig sits inside the bone
+ * hierarchy (parent chain of groups), so gizmo edits happen in the bone's
+ * local space; stored values are converted back to model space.
  */
 function SelectedCube() {
   const selected = useModel(selectSelectedCube);
+  const bones = useModel((s) => s.bones);
   const select = useModel((s) => s.select);
   const setTransform = useModel((s) => s.setTransform);
   const beginTransform = useModel((s) => s.beginTransform);
   const tool = useApp((s) => s.modelTool);
-  const groupRef = useRef<Object3D>(null);
-  const meshRef = useRef<Object3D>(null);
   const textures = useModel((s) => s.textures);
+
+  const rigRef = useRef<Object3D>(null);
+  const innerRef = useRef<Object3D>(null);
 
   const mode =
     tool === "Move"
@@ -182,98 +360,97 @@ function SelectedCube() {
           ? "scale"
           : null;
 
-  // Rebuild the rig when the cube data changes externally (undo, import, etc.)
+  // Frame of the cube's bone: model-space coordinates are mapped into the
+  // scene by W(bone) · T(-bonePivot), exactly like the unselected cubes.
+  const frame = useMemo(() => {
+    if (!selected) return null;
+    const bone = bones.find((b) => b.id === selected.boneId);
+    const m = boneWorldMatrix(bones, selected.boneId);
+    if (bone) m.multiply(new THREE.Matrix4().makeTranslation(-bone.origin[0], -bone.origin[1], -bone.origin[2]));
+    const pos = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    m.decompose(pos, quat, new THREE.Vector3());
+    return { pos, quat };
+  }, [selected?.boneId, bones]);
+
+  const [ifrom, ito] = useMemo(
+    () => (selected ? inflateBox(selected.from, selected.to, selected.inflate) : ([null, null] as const)),
+    [selected]
+  );
+
+  // Sync rig objects from store data (also after undo/import)
   useEffect(() => {
-    const g = groupRef.current;
-    const m = meshRef.current;
-    if (!g || !m || !selected) return;
-    const origin = selected.origin ?? [
-      (selected.from[0] + selected.to[0]) / 2,
-      (selected.from[1] + selected.to[1]) / 2,
-      (selected.from[2] + selected.to[2]) / 2,
-    ];
-    g.position.set(...origin);
-    g.rotation.set(selected.rotation[0] * DEG, selected.rotation[1] * DEG, selected.rotation[2] * DEG);
-    const [ifrom, ito] = inflateBox(selected.from, selected.to, selected.inflate);
-    m.position.set(
-      (ifrom[0] + ito[0]) / 2 - origin[0],
-      (ifrom[1] + ito[1]) / 2 - origin[1],
-      (ifrom[2] + ito[2]) / 2 - origin[2]
+    const rig = rigRef.current;
+    const inner = innerRef.current;
+    if (!rig || !inner || !selected || !ifrom || !ito) return;
+    rig.position.set(...selected.origin);
+    rig.rotation.set(
+      selected.rotation[0] * DEG,
+      selected.rotation[1] * DEG,
+      selected.rotation[2] * DEG,
+      ROT_ORDER
     );
-    m.scale.set(
+    inner.position.set(
+      (ifrom[0] + ito[0]) / 2 - selected.origin[0],
+      (ifrom[1] + ito[1]) / 2 - selected.origin[1],
+      (ifrom[2] + ito[2]) / 2 - selected.origin[2]
+    );
+    inner.scale.set(
       Math.max(1e-6, ito[0] - ifrom[0]),
       Math.max(1e-6, ito[1] - ifrom[1]),
       Math.max(1e-6, ito[2] - ifrom[2])
     );
-  }, [selected?.id, selected?.from, selected?.to, selected?.origin, selected?.rotation, selected?.inflate]);
+  }, [selected, ifrom, ito]);
 
   const tex = textures.length > 0 ? getSharedTexture(textures[0].source) : null;
-  const hasFaceUVs =
-    !!selected?.faces && Object.values(selected.faces).some((f) => f?.uv && (f.uv[0] !== f.uv[2] || f.uv[1] !== f.uv[3]));
-  const [fx, fy, fz] = selected?.from ?? [0, 0, 0];
-  const [tx, ty, tz] = selected?.to ?? [1, 1, 1];
-  const zeroThickness = tx - fx === 0 || ty - fy === 0 || tz - fz === 0;
 
-  if (!selected) return null;
+  if (!selected || !frame || !ifrom || !ito || isCubeHidden(selected, bones)) return null;
 
   const commit = () => {
-    const g = groupRef.current;
-    const m = meshRef.current;
-    if (!g || !m) return;
-    const origin: Vec3 = [g.position.x, g.position.y, g.position.z];
+    const rig = rigRef.current;
+    const inner = innerRef.current;
+    if (!rig || !inner) return;
+    // The rig lives in model space (inside the bone frame), so values are
+    // stored as-is, apart from undoing inflate.
+    const origin: Vec3 = [rig.position.x, rig.position.y, rig.position.z];
     const size: Vec3 = [
-      Math.max(1, m.scale.x),
-      Math.max(1, m.scale.y),
-      Math.max(1, m.scale.z),
+      Math.max(1e-6, inner.scale.x),
+      Math.max(1e-6, inner.scale.y),
+      Math.max(1e-6, inner.scale.z),
     ];
-    const ifrom: Vec3 = [
-      m.position.x - size[0] / 2 + origin[0],
-      m.position.y - size[1] / 2 + origin[1],
-      m.position.z - size[2] / 2 + origin[2],
-    ];
-    const ito: Vec3 = [
-      m.position.x + size[0] / 2 + origin[0],
-      m.position.y + size[1] / 2 + origin[1],
-      m.position.z + size[2] / 2 + origin[2],
-    ];
-    // Undo inflate before storing (store keeps the raw cube)
+    const cx = inner.position.x + origin[0];
+    const cy = inner.position.y + origin[1];
+    const cz = inner.position.z + origin[2];
     const inf = selected.inflate ?? 0;
-    const from: Vec3 = [ifrom[0] + inf, ifrom[1] + inf, ifrom[2] + inf];
-    const to: Vec3 = [ito[0] - inf, ito[1] - inf, ito[2] - inf];
     setTransform({
-      from,
-      to,
+      from: [cx - size[0] / 2 + inf, cy - size[1] / 2 + inf, cz - size[2] / 2 + inf],
+      to: [cx + size[0] / 2 - inf, cy + size[1] / 2 - inf, cz + size[2] / 2 - inf],
+      origin,
       rotation: [
-        +(g.rotation.x / DEG).toFixed(4),
-        +(g.rotation.y / DEG).toFixed(4),
-        +(g.rotation.z / DEG).toFixed(4),
+        +(rig.rotation.x / DEG).toFixed(4),
+        +(rig.rotation.y / DEG).toFixed(4),
+        +(rig.rotation.z / DEG).toFixed(4),
       ],
     });
   };
 
   return (
     <>
-      <group ref={groupRef}>
-        <mesh
-          ref={meshRef}
-          onClick={(e) => {
-            e.stopPropagation();
-            select(selected.id);
-          }}
-        >
-          <boxGeometry />
-          {tex && hasFaceUVs ? (
-            <meshStandardMaterial
-              map={tex}
-              side={zeroThickness ? THREE.DoubleSide : THREE.FrontSide}
-              transparent
-              alphaTest={0.01}
-            />
-          ) : (
-            <meshStandardMaterial color={selected.color} transparent opacity={0.9} />
-          )}
-          <Edges color="#4ea1ff" lineWidth={2} />
-        </mesh>
+      <group position={frame.pos} quaternion={frame.quat}>
+        <group ref={rigRef}>
+          <mesh
+            ref={innerRef}
+            userData={{ clickCube: selected.id, depth: 0 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              select(selected.id, "cube");
+            }}
+          >
+            <boxGeometry />
+            {cubeMaterial(selected, tex)}
+            <Edges color="#4ea1ff" lineWidth={2} />
+          </mesh>
+        </group>
       </group>
 
       {mode && (
@@ -281,7 +458,7 @@ function SelectedCube() {
           ref={(tc: TransformControlsImpl | null) => {
             gizmo.controls = tc;
           }}
-          object={mode === "scale" ? (meshRef as React.RefObject<Object3D>) : (groupRef as React.RefObject<Object3D>)}
+          object={mode === "scale" ? (innerRef as React.RefObject<Object3D>) : (rigRef as React.RefObject<Object3D>)}
           mode={mode}
           size={0.85}
           translationSnap={1}
@@ -300,9 +477,169 @@ function SelectedCube() {
   );
 }
 
-export default function Viewport() {
+/**
+ * The selected bone rendered as a pivot rig: gizmo acts on a group placed at
+ * the bone's world transform (parent chain composed). Rotation naturally
+ * happens around the bone's pivot.
+ */
+function SelectedBone() {
+  const bone = useModel(selectSelectedBone);
+  const bones = useModel((s) => s.bones);
+  const select = useModel((s) => s.select);
+  const setBoneTransform = useModel((s) => s.setBoneTransform);
+  const beginTransform = useModel((s) => s.beginTransform);
+  const tool = useApp((s) => s.modelTool);
+
+  const rigRef = useRef<Object3D>(null);
+
+  const mode =
+    tool === "Move"
+      ? "translate"
+      : tool === "Rotate"
+        ? "rotate"
+        : tool === "Scale"
+          ? "rotate" // scale on a bone = rotate (bones are points, not volumes)
+          : null;
+
+  // World transform of the bone = chain matrix of the rig hierarchy
+  const world = useMemo(() => {
+    if (!bone) return null;
+    return boneWorldMatrix(bones, bone.id);
+  }, [bone, bones]);
+
+  useEffect(() => {
+    const rig = rigRef.current;
+    if (!rig || !bone || !world) return;
+    rig.position.setFromMatrixPosition(world);
+    rig.quaternion.setFromRotationMatrix(world);
+  }, [bone, world]);
+
+  if (!bone || !world) return null;
+  if (bone.hidden || boneAncestors(bones, bone.parentId).some((b) => b.hidden)) return null;
+
+  const commit = () => {
+    const rig = rigRef.current;
+    if (!rig) return;
+    // world -> parent-local: divide out the parent chain's world matrix.
+    // Position stays in model space (bone.origin is model-space); only the
+    // rotation is expressed relative to the parent chain.
+    const parentM = boneWorldMatrix(
+      bones,
+      bones.find((b) => b.id === bone.id)?.parentId ?? null
+    );
+    const inv = parentM.clone().invert();
+    const localM = inv.clone().multiply(new THREE.Matrix4().compose(
+      rig.position.clone(),
+      rig.quaternion.clone(),
+      new THREE.Vector3(1, 1, 1)
+    ));
+    const pos = new THREE.Vector3().setFromMatrixPosition(localM);
+    // Same Z-Y-X Euler convention as everywhere else
+    const m4 = new THREE.Matrix4().extractRotation(localM);
+    const e = new THREE.Euler().setFromRotationMatrix(m4, ROT_ORDER);
+    const localRot: Vec3 = [e.x / DEG, e.y / DEG, e.z / DEG];
+    // `pos` is the parent-relative offset; the store keeps absolute origin.
+    const parentBone = bones.find((b) => b.id === bone.parentId) ?? null;
+    const newOrigin: Vec3 = parentBone
+      ? [parentBone.origin[0] + pos.x, parentBone.origin[1] + pos.y, parentBone.origin[2] + pos.z]
+      : [pos.x, pos.y, pos.z];
+    setBoneTransform({
+      origin: newOrigin,
+      rotation: [
+        +localRot[0].toFixed(4),
+        +localRot[1].toFixed(4),
+        +localRot[2].toFixed(4),
+      ],
+    });
+  };
+
+  return (
+    <>
+      <group ref={rigRef}>
+        <mesh
+          userData={{ clickBone: bone.id, depth: 0 }}
+          onClick={(e) => {
+            e.stopPropagation();
+            select(bone.id, "bone");
+          }}
+        >
+          <octahedronGeometry args={[1.4, 0]} />
+          <meshBasicMaterial color={bone.color} wireframe />
+        </mesh>
+      </group>
+
+      {mode && (
+        <TransformControls
+          ref={(tc: TransformControlsImpl | null) => {
+            gizmo.controls = tc;
+          }}
+          object={rigRef as React.RefObject<Object3D>}
+          mode={mode}
+          size={0.85}
+          translationSnap={1}
+          rotationSnap={THREE.MathUtils.degToRad(22.5)}
+          onObjectChange={commit}
+          onMouseDown={() => {
+            beginTransform();
+            gizmo.dragging = true;
+          }}
+          onMouseUp={() => {
+            gizmo.dragging = false;
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+/** Renders the full scene graph: root cubes, bone trees, and the selection rig. */
+function SceneContent() {
   const cubes = useModel((s) => s.cubes);
-  const selectedId = useModel((s) => s.selectedId);
+  const bones = useModel((s) => s.bones);
+  const textures = useModel((s) => s.textures);
+  const resolution = useModel((s) => s.resolution);
+  const tex = textures.length > 0 ? getSharedTexture(textures[0].source) : null;
+
+  const rootCubes = useMemo(() => cubes.filter((c) => !c.boneId), [cubes]);
+  const rootBones = useMemo(
+    () => bones.filter((b) => !b.parentId || !bones.some((x) => x.id === b.parentId)),
+    [bones]
+  );
+
+  return (
+    <group>
+      {rootCubes.map((cube) => (
+        <CubeObject key={cube.id} cube={cube} depth={0} tex={tex} resolution={resolution} />
+      ))}
+      {rootBones.map((bone) => (
+        <BoneNode
+          key={bone.id}
+          bone={bone}
+          allCubes={cubes}
+          allBones={bones}
+          depth={0}
+          tex={tex}
+          resolution={resolution}
+        />
+      ))}
+      <SelectedCube />
+      <SelectedBone />
+    </group>
+  );
+}
+
+/** Dev-only: expose the three scene for live diagnostics. */
+function DevSceneHook() {
+  const scene = useThree((s) => s.scene);
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      (window as unknown as { __scene?: THREE.Scene }).__scene = scene;
+    }
+  }, [scene]);
+  return null;
+}
+
+export default function Viewport() {
   const select = useModel((s) => s.select);
 
   return (
@@ -331,13 +668,8 @@ export default function Viewport() {
         infiniteGrid
       />
 
-      {cubes
-        .filter((c) => c.id !== selectedId)
-        .map((cube) => (
-          <CubeObject key={cube.id} cube={cube} />
-        ))}
-
-      <SelectedCube />
+      <SceneContent />
+      <DevSceneHook />
 
       <OrbitControls makeDefault enableDamping dampingFactor={0.15} />
 

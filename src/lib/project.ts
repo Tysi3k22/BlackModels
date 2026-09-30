@@ -1,4 +1,4 @@
-import { Cube, ProjectTexture, useModel } from "../stores/modelStore";
+import { Bone, Cube, ProjectTexture, useModel } from "../stores/modelStore";
 import { openTextFile, saveTextFile } from "./files";
 import { pushRecent } from "./recent";
 import { parseBbmodel } from "./bbmodel";
@@ -11,22 +11,24 @@ const PROJECT_FILTER = {
 };
 
 export interface ProjectFile {
-  version: 2;
+  version: 3;
   app: "blackmodels";
   name: string;
   resolution: [number, number];
   textures: ProjectTexture[];
+  bones: Bone[];
   cubes: Cube[];
 }
 
 export function serializeProject(): string {
-  const { name, cubes, textures, resolution } = useModel.getState();
+  const { name, cubes, bones, textures, resolution } = useModel.getState();
   const project: ProjectFile = {
-    version: 2,
+    version: 3,
     app: "blackmodels",
     name,
     resolution,
     textures,
+    bones,
     cubes,
   };
   return JSON.stringify(project, null, 2);
@@ -35,14 +37,15 @@ export function serializeProject(): string {
 export function parseProject(json: string): {
   name: string;
   cubes: Cube[];
+  bones: Bone[];
   textures: ProjectTexture[];
   resolution: [number, number];
 } {
-  const data = JSON.parse(json) as ProjectFile;
+  const data = JSON.parse(json) as Partial<ProjectFile>;
   if (!data || data.app !== "blackmodels" || !Array.isArray(data.cubes)) {
     throw new Error("Not a valid BlackModels project file");
   }
-  if (data.version !== 2) {
+  if (data.version !== 3) {
     throw new Error(`Unsupported project version: ${data.version}`);
   }
   for (const c of data.cubes) {
@@ -55,9 +58,17 @@ export function parseProject(json: string): {
       throw new Error("Corrupted cube entry in project file");
     }
   }
+  const bones = (data.bones ?? []).filter(
+    (b) =>
+      typeof b.id === "string" &&
+      typeof b.name === "string" &&
+      Array.isArray(b.origin) &&
+      Array.isArray(b.rotation)
+  );
   return {
     name: data.name ?? "Untitled",
     cubes: data.cubes,
+    bones,
     textures: data.textures ?? [],
     resolution: data.resolution ?? [256, 256],
   };
@@ -88,6 +99,7 @@ export function applyModelFile(
     let data: {
       name: string;
       cubes: Cube[];
+      bones: Bone[];
       textures: ProjectTexture[];
       resolution: [number, number];
     };
@@ -144,6 +156,7 @@ export function newProject(): void {
   useModel.getState().importProject({
     name: "Untitled",
     cubes: [],
+    bones: [],
     textures: [],
     resolution: [256, 256],
   });

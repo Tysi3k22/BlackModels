@@ -14,6 +14,9 @@ export default function ModelEditor() {
     const hasSelection = useModel((s) => s.selectedId !== null);
     const addCube = useModel((s) => s.addCube);
     const deleteSelected = useModel((s) => s.deleteSelected);
+    const modelName = useModel((s) => s.name);
+    const textures = useModel((s) => s.textures);
+    const cubesCount = useModel((s) => s.cubes.length);
 
     const undo = useModel((s) => s.undo);
     const redo = useModel((s) => s.redo);
@@ -49,6 +52,12 @@ export default function ModelEditor() {
                     />
                 ))}
                 <Divider />
+
+                <div className="px-3 pb-2 pt-1 text-[11px] leading-5 text-neutral-500">
+                    <div className="font-semibold tracking-widest text-neutral-400">{modelName}</div>
+                    <div>{cubesCount} cubes</div>
+                    {textures.length > 0 && <div>{textures.length} texture(s) embedded</div>}
+                </div>
 
                 <div className="mt-auto flex flex-col gap-1.5 p-2">
                     <button

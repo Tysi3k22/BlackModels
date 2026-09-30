@@ -135,7 +135,7 @@ Resource Pack / Plugin
 * [x] Move / Rotate / Scale
 * [x] Outliner
 * [x] Undo / Redo
-* [ ] Project save/load
+* [x] Project save/load
 
 ## Phase 2 — Minecraft Modeling
 
@@ -150,8 +150,8 @@ Resource Pack / Plugin
 
 ## Phase 3 — Blockbench Compatibility
 
-* [ ] `.bbmodel` importer
-* [ ] `.bbmodel` exporter
+* [x] `.bbmodel` importer
+* [x] `.bbmodel` exporter
 * [ ] Model validation
 * [ ] Version compatibility
 

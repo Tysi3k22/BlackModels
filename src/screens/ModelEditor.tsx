@@ -1,27 +1,35 @@
 import {PanelTitle, ToolButton, Divider} from "../components/Panel";
+import { ModelTools, useApp } from "../constants";
 
-export default function ModelingMenu() {
+const tools: ModelTools[] = ["Select", "Move", "Rotate", "Scale"];
+
+export default function ModelEditor() {
+    const modelTool = useApp((state) => state.modelTool);
+    const setModelTool = useApp((state) => state.setModelTool);
+
     return (
-        <main className="flex h-full w-full flex-column items-start justify-start p-4">
-            <div id="leftContainer" className="flex flex-col w-1/8">    
+        <main className="flex h-full w-full flex-row items-stretch justify-start">
+            <div id="leftContainer" className="flex w-1/8 min-w-44 flex-col">    
                 <PanelTitle>Tools</PanelTitle>
-                <ToolButton label="Select" active={true} onClick={() => {}} />
-                <ToolButton label="Move" onClick={() => {}} />
-                <ToolButton label="Rotate" onClick={() => {}} />
-                <ToolButton label="Scale" onClick={() => {}} />
+                {tools.map((tool) => (
+                    <ToolButton
+                        key={tool}
+                        label={tool}
+                        active={modelTool === tool}
+                        onClick={() => setModelTool(tool)}
+                    />
+                ))}
                 <Divider />
 
             </div>
 
 
-            <div id="middleContainer" className="flex flex-col w-full bg-white">
-                <h1>Model Preview</h1>
-                {/* there will be a canvas that shows the model in 3D, and you can rotate it and zoom in/out */}
-
+            <div id="middleContainer" className="flex w-full flex-col">
+                {/* TODO: 3D viewport (Three.js) */}
             </div>
 
-            <div id="rightContainer" className="flex flex-col w-1/8 bg-white">
-                <h1>Hierarchy</h1>
+            <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col">
+                <PanelTitle>Hierarchy</PanelTitle>
             </div>
         </main>
     )

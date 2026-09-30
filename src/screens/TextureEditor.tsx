@@ -1,26 +1,35 @@
 import {PanelTitle, ToolButton, Divider} from "../components/Panel";
+import { TextureTools, useApp } from "../constants";
 
 export default function TextureEditor() {
+    const tools: TextureTools[] = ["Brush", "Pencil", "Eraser", "Fill"];
+    const textureTool = useApp((state) => state.textureTool);
+    const setTextureTool = useApp((state) => state.setTextureTool);
+
     return (
-        <main className="flex h-full w-full flex-column items-start justify-start p-4">
-            <div id="leftContainer" className="flex flex-col w-1/8">    
+        <main className="flex h-full w-full flex-row items-stretch justify-start">
+            <div id="leftContainer" className="flex w-1/8 min-w-44 flex-col">    
                 <PanelTitle>Tools</PanelTitle>
-                <ToolButton label="Brush" active={true} onClick={() => {}} />
-                <ToolButton label="Pencil" onClick={() => {}} />
-                <ToolButton label="Eraser" onClick={() => {}} />
-                <ToolButton label="Fill" onClick={() => {}} />
+                {
+                    tools.map((tool) => (
+                        <ToolButton
+                            key={tool}
+                            label={tool}
+                            active={textureTool === tool}
+                            onClick={() => setTextureTool(tool)}
+                        />
+                    ))
+                }
                 <Divider />
             </div>
 
 
-            <div id="middleContainer" className="flex flex-col w-full bg-white">
-                <h1>Model Preview</h1>
-                {/* there will be a canvas that shows the model in 3D, and you can rotate it and zoom in/out */}
-
+            <div id="middleContainer" className="flex w-full flex-col">
+                {/* TODO: 3D viewport (Three.js) */}
             </div>
 
-            <div id="rightContainer" className="flex flex-col w-1/8 bg-white">
-                <h1>Texture file Preview</h1>
+            <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col">
+                <PanelTitle>Texture file Preview</PanelTitle>
             </div>
         </main>
     )

@@ -7,7 +7,7 @@ export default function EditorMenu() {
     const tab = useApp((state) => state.tab);
 
     return (
-        <main>
+        <main className="flex h-full w-full flex-col overflow-hidden">
             <NavBar />
 
             {tab === "Model" && <ModelEditor />}

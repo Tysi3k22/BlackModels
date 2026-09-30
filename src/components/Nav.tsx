@@ -18,7 +18,7 @@ export default function NavBar() {
           title="Main menu"
           className="px-4 text-sm font-bold tracking-widest hover:text-accent"
         >
-          BLOCKMODELS
+          BLACKMODELS
         </button>
         <nav className="flex h-full">
           {tabs.map((t) => (

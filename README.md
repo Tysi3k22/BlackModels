@@ -124,8 +124,8 @@ Resource Pack / Plugin
 
 ## Phase 1 — Core Editor
 
-* [ ] Tauri desktop application
-* [ ] React + TypeScript setup
+* [x] Tauri desktop application
+* [x] React + TypeScript setup
 * [ ] Three.js viewport
 * [ ] Minecraft grid
 * [ ] Camera controls

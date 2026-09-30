@@ -68,6 +68,7 @@ function SelectedCube() {
   const selected = useModel(selectSelectedCube);
   const select = useModel((s) => s.select);
   const setTransform = useModel((s) => s.setTransform);
+  const beginTransform = useModel((s) => s.beginTransform);
   const tool = useApp((s) => s.modelTool);
   const meshRef = useRef<Mesh>(null);
 
@@ -158,6 +159,7 @@ function SelectedCube() {
           scaleSnap={1}
           onObjectChange={commit}
           onMouseDown={() => {
+            beginTransform();
             gizmo.dragging = true;
           }}
           onMouseUp={() => {

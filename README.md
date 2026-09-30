@@ -134,7 +134,7 @@ Resource Pack / Plugin
 * [x] Object selection
 * [x] Move / Rotate / Scale
 * [x] Outliner
-* [ ] Undo / Redo
+* [x] Undo / Redo
 * [ ] Project save/load
 
 ## Phase 2 — Minecraft Modeling

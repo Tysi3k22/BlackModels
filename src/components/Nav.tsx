@@ -1,9 +1,14 @@
 import { Tab, useApp } from "../constants";
+import { useModel } from "../stores/modelStore";
 
 const tabs: Tab[] = ["Model", "Texture", "Animation"];
 
 export default function NavBar() {
     const { tab, setTab, setScreen } = useApp();
+    const canUndo = useModel((s) => s.past.length > 0);
+    const canRedo = useModel((s) => s.future.length > 0);
+    const undo = useModel((s) => s.undo);
+    const redo = useModel((s) => s.redo);
     const cls = (t: string) =>
       `h-full border-b-2 px-4 text-sm transition-colors ${
         tab === t
@@ -27,6 +32,24 @@ export default function NavBar() {
             </button>
           ))}
         </nav>
+        <div className="ml-4 flex items-center gap-1">
+          <button
+            onClick={undo}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z)"
+            className="rounded px-2 py-1 text-sm text-neutral-300 hover:bg-panel-2 disabled:pointer-events-none disabled:opacity-30"
+          >
+            ↶
+          </button>
+          <button
+            onClick={redo}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Y)"
+            className="rounded px-2 py-1 text-sm text-neutral-300 hover:bg-panel-2 disabled:pointer-events-none disabled:opacity-30"
+          >
+            ↷
+          </button>
+        </div>
         <div className="ml-auto flex h-full items-center pr-2 text-sm">
           <button onClick={() => setTab("AI")} className={cls("AI")}>
             AI

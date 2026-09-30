@@ -132,7 +132,7 @@ Resource Pack / Plugin
 * [x] Cube creation
 * [x] Cube deletion
 * [x] Object selection
-* [ ] Move / Rotate / Scale
+* [x] Move / Rotate / Scale
 * [x] Outliner
 * [ ] Undo / Redo
 * [ ] Project save/load

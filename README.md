@@ -144,7 +144,7 @@ Resource Pack / Plugin
 * [x] Parenting
 * [x] Pivot points
 * [x] Textures
-* [ ] UV mapping
+* [x] UV mapping
 * [ ] Materials
 * [ ] Minecraft-specific constraints
 

@@ -71,6 +71,7 @@ export function getPaintContext(tex: ProjectTexture, resW: number, resH: number)
         if (!offscreenCanvas) {
             offscreenCanvas = document.createElement("canvas");
             offscreenCtx = offscreenCanvas.getContext("2d")!;
+            (window as any).__paintOffscreen = offscreenCanvas;
         }
         if (offscreenCanvas.width !== resW || offscreenCanvas.height !== resH) {
             offscreenCanvas.width = resW;

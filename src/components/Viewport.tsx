@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
 import {
   Edges,
@@ -47,29 +47,33 @@ const ROT_ORDER = "ZYX" as const;
 const eulerDeg = (r: Vec3) =>
   new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, ROT_ORDER);
 
-// Shared texture cache (LRU, max 32) — one THREE.Texture per unique image.
-const textureCache = new Map<string, THREE.Texture>();
-const TEXTURE_CACHE_MAX = 32;
-function getSharedTexture(source: string): THREE.Texture | null {
-  const cached = textureCache.get(source);
-  if (cached) {
-    // Refresh LRU order
-    textureCache.delete(source);
-    textureCache.set(source, cached);
-    return cached;
+// Texture cache keyed by texture index — reuses the same THREE.Texture object
+// and updates its image in-place when the source changes, avoiding full reloads.
+const textureCacheByIndex = new Map<number, { tex: THREE.Texture; source: string }>();
+function getSharedTexture(source: string, index?: number): THREE.Texture | null {
+  if (index != null) {
+    const cached = textureCacheByIndex.get(index);
+    if (cached) {
+      if (cached.source !== source) {
+        // Source changed (paint stroke) — update image in place
+        const img = new Image();
+        img.onload = () => {
+          cached.tex.image = img;
+          cached.tex.needsUpdate = true;
+        };
+        img.src = source;
+        cached.source = source;
+      }
+      return cached.tex;
+    }
   }
   try {
     const t = new THREE.TextureLoader().load(source);
     t.magFilter = THREE.NearestFilter;
     t.minFilter = THREE.NearestFilter;
     t.colorSpace = THREE.SRGBColorSpace;
-    textureCache.set(source, t);
-    while (textureCache.size > TEXTURE_CACHE_MAX) {
-      const oldest = textureCache.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      const old = textureCache.get(oldest);
-      textureCache.delete(oldest);
-      old?.dispose();
+    if (index != null) {
+      textureCacheByIndex.set(index, { tex: t, source });
     }
     return t;
   } catch {
@@ -154,8 +158,9 @@ function cubeMaterial(
     <>
       {BOX_FACE_ORDER.map((face, i) => {
         const f = cube.faces?.[face];
-        const src = f?.texture != null ? textures[f.texture]?.source : undefined;
-        const tex = src ? getSharedTexture(src) : null;
+        const texIdx = f?.texture != null ? f.texture : undefined;
+        const src = texIdx != null ? textures[texIdx]?.source : undefined;
+        const tex = src ? getSharedTexture(src, texIdx) : null;
         return tex ? (
           <meshStandardMaterial
             key={face}
@@ -193,7 +198,7 @@ function useCubeGeometry(
   }, [cube?.id, cube?.faces, resolution[0], resolution[1]]);
 }
 
-import { ThreeEvent } from "@react-three/fiber";
+import { ThreeEvent, useFrame } from "@react-three/fiber";
 import { getPaintContext, floodFillAt, paintLine, paintSquare } from "../lib/paint";
 
 const gridVertexShader = `
@@ -208,36 +213,85 @@ const gridFragmentShader = `
   uniform vec2 uResolution;
   uniform vec3 uColor;
   uniform float uAlpha;
+  uniform vec2 uCursor;
+  uniform float uBrushSize;
+  uniform float uShowCursor;
   varying vec2 vUv;
   
   void main() {
     vec2 px = vUv * uResolution;
     vec2 grid = fract(px);
     
-    // Smooth thin lines using fwidth for perfect 1px rendering at any zoom
     vec2 fw = fwidth(px);
     vec2 dist = min(grid, 1.0 - grid);
     
     vec2 edge = smoothstep(fw * 0.0, fw * 1.5, dist);
-    float alpha = 1.0 - min(edge.x, edge.y);
+    float gridAlpha = 1.0 - min(edge.x, edge.y);
     
-    if (alpha < 0.05) discard;
-    gl_FragColor = vec4(uColor, uAlpha * alpha);
+    // Brush cursor highlight
+    float cursorAlpha = 0.0;
+    if (uShowCursor > 0.5) {
+      float h = floor(uBrushSize / 2.0);
+      vec2 cursorMin = uCursor - h;
+      vec2 cursorMax = cursorMin + uBrushSize;
+      vec2 pixelPos = floor(px);
+      if (pixelPos.x >= cursorMin.x && pixelPos.x < cursorMax.x &&
+          pixelPos.y >= cursorMin.y && pixelPos.y < cursorMax.y) {
+        cursorAlpha = 0.35;
+      }
+    }
+    
+    float totalAlpha = max(gridAlpha * uAlpha, cursorAlpha);
+    if (totalAlpha < 0.05) discard;
+    
+    vec3 finalColor = uColor;
+    if (cursorAlpha > gridAlpha * uAlpha) {
+      finalColor = vec3(1.0, 0.75, 0.15); // brush cursor color (amber)
+    }
+    gl_FragColor = vec4(finalColor, totalAlpha);
   }
 `;
 
-function PixelGridMaterial({ resolution, attach }: { resolution: [number, number]; attach?: string }) {
+function PixelGridMaterial({ resolution, attach, cursorUV, brushSize, showCursor }: { 
+  resolution: [number, number]; 
+  attach?: string;
+  cursorUV?: [number, number];
+  brushSize?: number;
+  showCursor?: boolean;
+}) {
+  const matRef = useRef<THREE.ShaderMaterial>(null);
+
   const uniforms = useMemo(
     () => ({
       uResolution: { value: new THREE.Vector2(resolution[0], resolution[1]) },
       uColor: { value: new THREE.Color("#000000") },
       uAlpha: { value: 0.65 },
+      uCursor: { value: new THREE.Vector2(-999, -999) },
+      uBrushSize: { value: 1.0 },
+      uShowCursor: { value: 0.0 },
     }),
     [resolution[0], resolution[1]]
   );
 
+  // Update cursor uniforms every frame for smooth tracking
+  useFrame(() => {
+    const mat = matRef.current;
+    if (!mat) return;
+    if (showCursor && cursorUV) {
+      mat.uniforms.uCursor.value.set(
+        cursorUV[0] * resolution[0],
+        cursorUV[1] * resolution[1]
+      );
+      mat.uniforms.uBrushSize.value = brushSize ?? 1;
+      mat.uniforms.uShowCursor.value = 1.0;
+    } else {
+      mat.uniforms.uShowCursor.value = 0.0;
+    }
+  });
+
   return (
     <shaderMaterial
+      ref={matRef}
       attach={attach}
       uniforms={uniforms}
       vertexShader={gridVertexShader}
@@ -248,6 +302,19 @@ function PixelGridMaterial({ resolution, attach }: { resolution: [number, number
       polygonOffsetFactor={-1}
     />
   );
+}
+
+/** Push an arbitrary canvas bitmap into the live THREE texture so strokes appear instantly. */
+export function flushCanvasToLiveTexture(textureIndex: number, canvas: HTMLCanvasElement | null) {
+  const cached = textureCacheByIndex.get(textureIndex);
+  if (!cached || !canvas) return;
+  cached.tex.image = canvas;
+  cached.tex.needsUpdate = true;
+}
+
+/** Flush the offscreen paint canvas into the live THREE texture so strokes appear instantly. */
+function flushToLiveTexture(textureIndex: number) {
+  flushCanvasToLiveTexture(textureIndex, (window as any).__paintOffscreen as HTMLCanvasElement | undefined ?? null);
 }
 
 /**
@@ -288,6 +355,10 @@ function CubeObject({
   const geometry = useCubeGeometry(cube, resolution);
   const textureMode = useContext(TextureModeContext);
   const stroke = useRef<{ last: [number, number] } | null>(null);
+  /** UV under the pointer on this cube (texture mode) — drives the 3D brush cursor. */
+  const [hoverUV, setHoverUV] = useState<[number, number] | null>(null);
+  const sizeTool = textureTool === "Brush" || textureTool === "Pencil" || textureTool === "Eraser";
+  const effBrushSize = textureTool === "Pencil" ? 1 : textureBrushSize;
 
   // The selected cube is drawn by <SelectedCube/> (with gizmo) instead —
   // except in texture mode, where it stays in its bone like every other cube.
@@ -310,6 +381,9 @@ function CubeObject({
   const handlePointerDown = async (e: ThreeEvent<PointerEvent>) => {
     if (!textureMode) return;
     e.stopPropagation();
+    // The UV tool edits face rects in the 2D canvas; it never paints.
+    if (textureTool === "UV") return;
+    if (e.uv) setHoverUV([e.uv.x, e.uv.y]);
     if (activeTexture == null || !textures[activeTexture]) return;
     if (!e.uv) return;
     
@@ -331,15 +405,19 @@ function CubeObject({
     }
     if (textureTool === "Fill") {
       floodFillAt(ctx, hit[0], hit[1], textureColor, w, h);
+      flushToLiveTexture(activeTexture);
       commitTexturePixels(ctx.canvas.toDataURL("image/png"), { faces: [] });
       return;
     }
     stroke.current = { last: hit };
-    paintSquare(ctx, hit[0], hit[1], textureTool === "Pencil" ? 1 : textureBrushSize, textureTool === "Eraser", textureColor);
+    paintSquare(ctx, hit[0], hit[1], effBrushSize, textureTool === "Eraser", textureColor);
+    flushToLiveTexture(activeTexture);
   };
   
   const handlePointerMove = async (e: ThreeEvent<PointerEvent>) => {
-    if (!textureMode || !stroke.current) return;
+    if (!textureMode) return;
+    if (e.uv) setHoverUV([e.uv.x, e.uv.y]);
+    if (!stroke.current) return;
     e.stopPropagation();
     if (activeTexture == null || !textures[activeTexture]) return;
     if (!e.uv) return;
@@ -351,8 +429,9 @@ function CubeObject({
     const hit: [number, number] = [px, py];
     
     const ctx = await getPaintContext(tex, w, h);
-    paintLine(ctx, stroke.current.last, hit, textureTool === "Pencil" ? 1 : textureBrushSize, textureTool === "Eraser", textureColor);
+    paintLine(ctx, stroke.current.last, hit, effBrushSize, textureTool === "Eraser", textureColor);
     stroke.current = { last: hit };
+    flushToLiveTexture(activeTexture);
   };
   
   const handlePointerUp = async () => {
@@ -373,7 +452,6 @@ function CubeObject({
       position={groupPos}
       rotation={eulerDeg(cube.rotation)}
       onClick={(e) => {
-        if (textureMode) return;
         e.stopPropagation();
         select(cube.id, "cube");
       }}
@@ -386,6 +464,7 @@ function CubeObject({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerOut={() => setHoverUV(null)}
       >
         {cubeMaterial(cube, textures)}
       </mesh>
@@ -397,9 +476,19 @@ function CubeObject({
               key={face}
               attach={`material-${i}`}
               resolution={resolution}
+              cursorUV={hoverUV ?? undefined}
+              brushSize={effBrushSize}
+              showCursor={sizeTool && hoverUV != null}
             />
           ))}
         </mesh>
+      )}
+
+      {textureMode && cube.id === selectedId && (
+        <lineSegments position={meshPos} scale={size}>
+          <edgesGeometry args={[geometry]} />
+          <lineBasicMaterial color="#fbbf24" depthTest={false} />
+        </lineSegments>
       )}
     </group>
   );

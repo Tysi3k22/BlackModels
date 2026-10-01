@@ -1,4 +1,14 @@
 import { create } from "zustand";
+import {
+  blockSize,
+  boxUnwrap,
+  clampUV,
+  cubePixelSize,
+  findSlotForCube,
+  gridFromCubes,
+  packCubes,
+  toCubeFaces,
+} from "../lib/uv";
 
 /** bbmodel marker colors used by Blockbench (index into this palette). */
 export const BB_MARKER_COLORS = [
@@ -103,6 +113,14 @@ export interface TextureUpdates {
   faces: (FaceUVUpdate & { cubeId?: string })[];
 }
 
+/** Outcome of an auto-UV run (for UI feedback). */
+export interface AutoUVResult {
+  /** Cubes that were unwrapped. */
+  count: number;
+  /** Cubes that did not fit in the atlas and were left overlapping at (0, 0). */
+  overflow: number;
+}
+
 export interface TransformUpdate {
   from: Vec3;
   to: Vec3;
@@ -143,6 +161,16 @@ interface ModelState {
   setActiveTexture: (index: number | null) => void;
   /** Write painted pixels into the active texture and update face UVs. */
   commitTexturePixels: (dataUrl: string, updates: TextureUpdates) => void;
+  /**
+   * Set one face's UV rect (clamped to the atlas, whole pixels). Pass `record`
+   * for one-shot edits (typed values); drags call `beginTransform` first instead.
+   */
+  setFaceUV: (cubeId: string, face: FaceName, uv: FaceUV, record?: boolean) => void;
+  /**
+   * Box-unwrap cubes into free atlas space. "selected" re-unwraps the selected
+   * cube; "all" repacks every cube on the active texture (plus untextured ones).
+   */
+  autoUV: (scope: "selected" | "all") => AutoUVResult;
   /** Snapshot before a drag starts, so the whole drag is one undo step. */
   beginTransform: () => void;
   setTransform: (t: TransformUpdate) => void;
@@ -226,17 +254,19 @@ export const useModel = create<ModelState>((set, get) => ({
       const n = maxIdNumber(state.cubes.map((c) => c.id), "cube-") + 1;
       const id = `cube-${n}`;
       const row = 0;
+      const from: Vec3 = [0, row, 0];
+      const to: Vec3 = [1, row + 1, 1];
       const cube: Cube = {
         id,
         name: `Cube ${n}`,
-        from: [0, row * 16, 0],
-        to: [16, row * 16 + 16, 16],
-        origin: [8, row * 16 + 8, 8],
+        from,
+        to,
+        origin: [0.5, row + 0.5, 0.5],
         rotation: [0, 0, 0],
         color: CUBE_COLORS[(n - 1) % CUBE_COLORS.length],
         marker: 0,
         boneId: state.selectedKind === "bone" ? state.selectedId : null,
-        faces: newTextureFaces(state),
+        faces: newTextureFaces(state, { from, to }),
       };
       return {
         past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
@@ -401,6 +431,75 @@ export const useModel = create<ModelState>((set, get) => ({
         cubes,
       };
     }),
+
+  setFaceUV: (cubeId, face, uv, record = false) =>
+    set((state) => {
+      const cube = state.cubes.find((c) => c.id === cubeId);
+      if (!cube) return {};
+      const next = clampUV(uv, state.resolution);
+      const prev = cube.faces?.[face];
+      if (
+        prev &&
+        prev.uv[0] === next[0] &&
+        prev.uv[1] === next[1] &&
+        prev.uv[2] === next[2] &&
+        prev.uv[3] === next[3]
+      ) {
+        return {};
+      }
+      const faces: CubeFaces = {
+        ...(cube.faces ?? {}),
+        [face]: { uv: next, texture: prev?.texture ?? state.activeTexture },
+      };
+      return {
+        ...(record
+          ? { past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT), future: [] }
+          : {}),
+        cubes: state.cubes.map((c) => (c.id === cubeId ? { ...c, faces } : c)),
+      };
+    }),
+
+  autoUV: (scope) => {
+    const result: AutoUVResult = { count: 0, overflow: 0 };
+    set((state) => {
+      const tex = state.activeTexture;
+      const res = state.resolution;
+      let updated = new Map<string, Required<CubeFaces>>();
+
+      if (scope === "selected") {
+        const cube =
+          state.selectedKind === "cube" ? state.cubes.find((c) => c.id === state.selectedId) : null;
+        if (!cube) return {};
+        const others = state.cubes.filter((c) => c.id !== cube.id);
+        const size = cubePixelSize(cube);
+        const slot = gridFromCubes(others, res).findSlot(...blockSize(size));
+        const [u, v] = slot ?? [0, 0];
+        if (!slot) result.overflow = 1;
+        updated.set(cube.id, toCubeFaces(boxUnwrap(size, u, v), cubeTextureIndex(cube) ?? tex));
+      } else {
+        // Only cubes living on the active texture (or not textured yet) share its atlas.
+        const targets = state.cubes.filter((c) => {
+          const t = cubeTextureIndex(c);
+          return t == null || t === tex;
+        });
+        if (targets.length === 0) return {};
+        const packed = packCubes(targets, res, tex);
+        updated = packed.placed;
+        result.overflow = packed.overflow.length;
+      }
+
+      result.count = updated.size;
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        cubes: state.cubes.map((c) => {
+          const faces = updated.get(c.id);
+          return faces ? { ...c, faces } : c;
+        }),
+      };
+    });
+    return result;
+  },
 
   beginTransform: () =>
     set((state) => ({
@@ -590,21 +689,18 @@ export function cubeTextureIndex(cube: Cube): number | null {
   return best;
 }
 
-/** Blank per-face UV slots bound to the active texture (for new cubes). */
-function newTextureFaces(state: {
-  activeTexture: number | null;
-  resolution: [number, number];
-}): CubeFaces | undefined {
+/** Box-unwrapped UV faces in a free atlas slot, bound to the active texture (for new cubes). */
+function newTextureFaces(
+  state: {
+    activeTexture: number | null;
+    resolution: [number, number];
+    cubes: Cube[];
+  },
+  geometry: { from: Vec3; to: Vec3 }
+): CubeFaces | undefined {
   if (state.activeTexture == null) return undefined;
-  const [w, h] = state.resolution;
-  return {
-    north: { uv: [0, 0, w, h], texture: state.activeTexture },
-    east: { uv: [0, 0, w, h], texture: state.activeTexture },
-    south: { uv: [0, 0, w, h], texture: state.activeTexture },
-    west: { uv: [0, 0, w, h], texture: state.activeTexture },
-    up: { uv: [0, 0, w, h], texture: state.activeTexture },
-    down: { uv: [0, 0, w, h], texture: state.activeTexture },
-  };
+  const [u, v] = findSlotForCube(geometry, state.cubes, state.resolution);
+  return toCubeFaces(boxUnwrap(cubePixelSize(geometry), u, v), state.activeTexture);
 }
 
 /** True if the cube itself or any bone above it is hidden. */

@@ -18,6 +18,7 @@ import {
   CubeFaces,
   Vec3,
   isCubeHidden,
+  ProjectTexture,
   boneAncestors,
   selectSelectedBone,
   selectSelectedCube,
@@ -32,8 +33,6 @@ const gizmo = {
   dragging: false,
   controls: null as TransformControlsImpl | null,
 };
-
-// Accessing the private `axis` property of three's TransformControls
 const isGizmoBusy = () =>
   gizmo.dragging ||
   (gizmo.controls as unknown as { axis: string | null } | null)?.axis != null;
@@ -45,18 +44,30 @@ const ROT_ORDER = "ZYX" as const;
 const eulerDeg = (r: Vec3) =>
   new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, ROT_ORDER);
 
-// Shared texture cache: one THREE.Texture per unique embedded image
+// Shared texture cache (LRU, max 32) — one THREE.Texture per unique image.
 const textureCache = new Map<string, THREE.Texture>();
-
+const TEXTURE_CACHE_MAX = 32;
 function getSharedTexture(source: string): THREE.Texture | null {
   const cached = textureCache.get(source);
-  if (cached) return cached;
+  if (cached) {
+    // Refresh LRU order
+    textureCache.delete(source);
+    textureCache.set(source, cached);
+    return cached;
+  }
   try {
     const t = new THREE.TextureLoader().load(source);
     t.magFilter = THREE.NearestFilter;
     t.minFilter = THREE.NearestFilter;
     t.colorSpace = THREE.SRGBColorSpace;
     textureCache.set(source, t);
+    while (textureCache.size > TEXTURE_CACHE_MAX) {
+      const oldest = textureCache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      const old = textureCache.get(oldest);
+      textureCache.delete(oldest);
+      old?.dispose();
+    }
     return t;
   } catch {
     return null;
@@ -66,6 +77,7 @@ function getSharedTexture(source: string): THREE.Texture | null {
 // BoxGeometry face order: px, nx, py, ny, pz, nz
 // Minecraft/bbmodel: east=+X, west=-X, up=+Y, down=-Y, south=+Z, north=-Z
 const BOX_FACE_ORDER = ["east", "west", "up", "down", "south", "north"] as const;
+// Material slots matching BOX_FACE_ORDER (0=px east, 1=nx west, 2=py up, 3=ny down, 4=pz south, 5=nz north)
 
 /**
  * Rewrites a BoxGeometry's UVs so each face samples its bbmodel face UV
@@ -105,53 +117,70 @@ function inflateBox(from: Vec3, to: Vec3, inflate?: number): [Vec3, Vec3] {
   ];
 }
 
-function cubeMaterial(cube: {
-  color: string;
-  faces?: CubeFaces;
-  inflate?: number;
-  from: Vec3;
-  to: Vec3;
-}, tex: THREE.Texture | null) {
-  const hasFaceUVs =
-    !!cube.faces &&
-    Object.values(cube.faces).some(
-      (f) => f?.uv && (f.uv[0] !== f.uv[2] || f.uv[1] !== f.uv[3])
-    );
+function cubeMaterial(
+  cube: {
+    color: string;
+    faces?: CubeFaces;
+    inflate?: number;
+    from: Vec3;
+    to: Vec3;
+  },
+  textures: ProjectTexture[]
+) {
   const [fx, fy, fz] = cube.from;
   const [tx, ty, tz] = cube.to;
   const zeroThickness = tx - fx === 0 || ty - fy === 0 || tz - fz === 0;
-  if (tex && hasFaceUVs) {
-    return (
-      <meshStandardMaterial
-        map={tex}
-        side={zeroThickness ? THREE.DoubleSide : THREE.FrontSide}
-        transparent
-        alphaTest={0.01}
-      />
-    );
+  const side = zeroThickness ? THREE.DoubleSide : THREE.FrontSide;
+
+  const anyTextured =
+    !!cube.faces &&
+    Object.values(cube.faces).some((f) => f?.texture != null && textures[f.texture]);
+
+  if (!anyTextured) {
+    return <meshStandardMaterial color={cube.color} transparent opacity={0.9} side={side} />;
   }
-  return <meshStandardMaterial color={cube.color} transparent opacity={0.9} />;
+
+  return (
+    <>
+      {BOX_FACE_ORDER.map((face, i) => {
+        const f = cube.faces?.[face];
+        const src = f?.texture != null ? textures[f.texture]?.source : undefined;
+        const tex = src ? getSharedTexture(src) : null;
+        return tex ? (
+          <meshStandardMaterial
+            key={face}
+            attach={`material-${i}`}
+            map={tex}
+            side={side}
+            transparent
+            alphaTest={0.01}
+          />
+        ) : (
+          <meshStandardMaterial
+            key={face}
+            attach={`material-${i}`}
+            color={cube.color}
+            side={side}
+            transparent
+            opacity={0.9}
+          />
+        );
+      })}
+    </>
+  );
 }
 
 /** Cube geometry with per-face UVs from bbmodel data. */
 function useCubeGeometry(
   cube: Cube,
-  tex: THREE.Texture | null,
   resolution: [number, number]
 ): THREE.BoxGeometry {
   return useMemo(() => {
     const g = new THREE.BoxGeometry(1, 1, 1);
-    if (tex) {
-      const hasFaceUVs =
-        !!cube.faces &&
-        Object.values(cube.faces).some(
-          (f) => f?.uv && (f.uv[0] !== f.uv[2] || f.uv[1] !== f.uv[3])
-        );
-      if (hasFaceUVs) applyFaceUVs(g, cube.faces, resolution);
-    }
+    applyFaceUVs(g, cube.faces, resolution);
     return g;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tex?.uuid, cube.faces, resolution[0], resolution[1]]);
+  }, [cube.faces, resolution[0], resolution[1]]);
 }
 
 /**
@@ -162,15 +191,13 @@ function useCubeGeometry(
 function CubeObject({
   cube,
   offset,
-  depth,
-  tex,
+  textures,
   resolution,
 }: {
   cube: Cube;
   /** Bone pivot in model space (omit for root cubes). */
   offset?: Vec3;
-  depth: number;
-  tex: THREE.Texture | null;
+  textures: ProjectTexture[];
   resolution: [number, number];
 }) {
   const select = useModel((s) => s.select);
@@ -180,7 +207,7 @@ function CubeObject({
     () => inflateBox(cube.from, cube.to, cube.inflate),
     [cube.from, cube.to, cube.inflate]
   );
-  const geometry = useCubeGeometry(cube, tex, resolution);
+  const geometry = useCubeGeometry(cube, resolution);
 
   // The selected cube is drawn by <SelectedCube/> (with gizmo) instead
   if (cube.id === selectedId || isCubeHidden(cube, bones)) return null;
@@ -208,8 +235,8 @@ function CubeObject({
         select(cube.id, "cube");
       }}
     >
-      <mesh position={meshPos} scale={size} geometry={geometry} userData={{ clickCube: cube.id, depth }}>
-        {cubeMaterial(cube, tex)}
+      <mesh position={meshPos} scale={size} geometry={geometry} userData={{ clickCube: cube.id }}>
+        {cubeMaterial(cube, textures)}
       </mesh>
     </group>
   );
@@ -255,15 +282,13 @@ function BoneNode({
   bone,
   allCubes,
   allBones,
-  depth,
-  tex,
+  textures,
   resolution,
 }: {
   bone: Bone;
   allCubes: Cube[];
   allBones: Bone[];
-  depth: number;
-  tex: THREE.Texture | null;
+  textures: ProjectTexture[];
   resolution: [number, number];
 }) {
   const select = useModel((s) => s.select);
@@ -291,7 +316,7 @@ function BoneNode({
       {showPivots && (
         <>
           <mesh
-            userData={{ clickBone: bone.id, depth }}
+            userData={{ clickBone: bone.id }}
             onClick={(e) => {
               e.stopPropagation();
               select(bone.id, "bone");
@@ -302,7 +327,7 @@ function BoneNode({
           </mesh>
           <mesh
             position={[0, -1.6, 0]}
-            userData={{ clickBone: bone.id, depth }}
+            userData={{ clickBone: bone.id }}
             onClick={(e) => {
               e.stopPropagation();
               select(bone.id, "bone");
@@ -317,7 +342,7 @@ function BoneNode({
       {/* Cube coords are model-space; CubeObject subtracts the bone pivot
           because this group's origin already sits on the pivot. */}
       {boneCubes.map((cube) => (
-        <CubeObject key={cube.id} cube={cube} offset={bone.origin} depth={depth + 1} tex={tex} resolution={resolution} />
+        <CubeObject key={cube.id} cube={cube} offset={bone.origin} textures={textures} resolution={resolution} />
       ))}
       {childBones.map((child) => (
         <BoneNode
@@ -325,8 +350,7 @@ function BoneNode({
           bone={child}
           allCubes={allCubes}
           allBones={allBones}
-          depth={depth + 1}
-          tex={tex}
+          textures={textures}
           resolution={resolution}
         />
       ))}
@@ -402,8 +426,6 @@ function SelectedCube() {
     );
   }, [selected, ifrom, ito]);
 
-  const tex = textures.length > 0 ? getSharedTexture(textures[0].source) : null;
-
   if (!selected || !frame || !ifrom || !ito || isCubeHidden(selected, bones)) return null;
 
   const commit = () => {
@@ -440,14 +462,14 @@ function SelectedCube() {
         <group ref={rigRef}>
           <mesh
             ref={innerRef}
-            userData={{ clickCube: selected.id, depth: 0 }}
+            userData={{ clickCube: selected.id }}
             onClick={(e) => {
               e.stopPropagation();
               select(selected.id, "cube");
             }}
           >
             <boxGeometry />
-            {cubeMaterial(selected, tex)}
+            {cubeMaterial(selected, textures)}
             <Edges color="#4ea1ff" lineWidth={2} />
           </mesh>
         </group>
@@ -598,7 +620,6 @@ function SceneContent() {
   const bones = useModel((s) => s.bones);
   const textures = useModel((s) => s.textures);
   const resolution = useModel((s) => s.resolution);
-  const tex = textures.length > 0 ? getSharedTexture(textures[0].source) : null;
 
   const rootCubes = useMemo(() => cubes.filter((c) => !c.boneId), [cubes]);
   const rootBones = useMemo(
@@ -609,7 +630,7 @@ function SceneContent() {
   return (
     <group>
       {rootCubes.map((cube) => (
-        <CubeObject key={cube.id} cube={cube} depth={0} tex={tex} resolution={resolution} />
+        <CubeObject key={cube.id} cube={cube} textures={textures} resolution={resolution} />
       ))}
       {rootBones.map((bone) => (
         <BoneNode
@@ -617,8 +638,7 @@ function SceneContent() {
           bone={bone}
           allCubes={cubes}
           allBones={bones}
-          depth={0}
-          tex={tex}
+          textures={textures}
           resolution={resolution}
         />
       ))}

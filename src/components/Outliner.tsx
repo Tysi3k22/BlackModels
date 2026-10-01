@@ -2,33 +2,12 @@ import { useMemo, useState } from "react";
 import {
   Bone,
   Cube,
+  descendantBoneIds,
   selectSelectedBone,
   selectSelectedCube,
   useModel,
 } from "../stores/modelStore";
 import { PanelTitle } from "./Panel";
-
-/** Ids of `root` and everything under it. */
-function descendantBoneIds(bones: Bone[], root: string): Set<string> {
-  const byParent = new Map<string | null, string[]>();
-  for (const b of bones) {
-    const list = byParent.get(b.parentId) ?? [];
-    list.push(b.id);
-    byParent.set(b.parentId, list);
-  }
-  const out = new Set<string>([root]);
-  const queue = [root];
-  while (queue.length) {
-    const cur = queue.pop() as string;
-    for (const child of byParent.get(cur) ?? []) {
-      if (!out.has(child)) {
-        out.add(child);
-        queue.push(child);
-      }
-    }
-  }
-  return out;
-}
 
 function EyeButton({
   hidden,

@@ -12,6 +12,19 @@ const BONE_COLORS = ["#e8b968", "#b9a0e8", "#68d4b9", "#e87979", "#79b1e8"];
 
 export type Vec3 = [number, number, number];
 export type FaceName = "north" | "east" | "south" | "west" | "up" | "down";
+
+/** All faces in canonical order. */
+export const FACE_NAMES: FaceName[] = ["north", "east", "south", "west", "up", "down"];
+
+/** Outward normal of each cube face (Minecraft convention). */
+export const FACE_DIRS: Record<FaceName, Vec3> = {
+  north: [0, 0, -1],
+  east: [1, 0, 0],
+  south: [0, 0, 1],
+  west: [-1, 0, 0],
+  up: [0, 1, 0],
+  down: [0, -1, 0],
+};
 export type FaceUV = [number, number, number, number];
 
 export interface CubeFaces {
@@ -73,8 +86,21 @@ export type SelectedKind = "cube" | "bone";
 interface HistoryEntry {
   cubes: Cube[];
   bones: Bone[];
+  textures: ProjectTexture[];
   selectedId: string | null;
   selectedKind: SelectedKind | null;
+}
+
+/** One face's UV after a paint stroke. */
+export interface FaceUVUpdate {
+  face: FaceName;
+  uv: FaceUV;
+}
+
+/** Result of committing a paint stroke: new texture data + per-cube UV updates. */
+export interface TextureUpdates {
+  /** Per-cube UV rect updates (cubeId missing = applies to every cube with a face on that side). */
+  faces: (FaceUVUpdate & { cubeId?: string })[];
 }
 
 export interface TransformUpdate {
@@ -95,6 +121,8 @@ interface ModelState {
   cubes: Cube[];
   bones: Bone[];
   textures: ProjectTexture[];
+  /** Index into `textures` of the one being edited/painted. */
+  activeTexture: number | null;
   /** Texture resolution in pixels (e.g. [256, 256]). */
   resolution: [number, number];
   selectedId: string | null;
@@ -105,6 +133,16 @@ interface ModelState {
   addBone: (parentId?: string | null) => void;
   deleteSelected: () => void;
   select: (id: string | null, kind?: SelectedKind | null) => void;
+  /** Add an imported texture (base64 data URL) and make it active. */
+  addTexture: (t: ProjectTexture) => void;
+  /** Remove a texture; faces referencing it fall back to untextured. */
+  removeTexture: (index: number) => void;
+  /** Create a blank texture (optionally with a custom resolution). */
+  createTexture: (name: string, res?: [number, number]) => void;
+  /** Which texture painting tools edit. */
+  setActiveTexture: (index: number | null) => void;
+  /** Write painted pixels into the active texture and update face UVs. */
+  commitTexturePixels: (dataUrl: string, updates: TextureUpdates) => void;
   /** Snapshot before a drag starts, so the whole drag is one undo step. */
   beginTransform: () => void;
   setTransform: (t: TransformUpdate) => void;
@@ -132,11 +170,13 @@ const HISTORY_LIMIT = 100;
 const snapshot = (s: {
   cubes: Cube[];
   bones: Bone[];
+  textures: ProjectTexture[];
   selectedId: string | null;
   selectedKind: SelectedKind | null;
 }): HistoryEntry => ({
   cubes: s.cubes,
   bones: s.bones,
+  textures: s.textures,
   selectedId: s.selectedId,
   selectedKind: s.selectedKind,
 });
@@ -148,7 +188,7 @@ const maxIdNumber = (ids: string[], prefix: string): number =>
   }, 0);
 
 /** All bone ids that would become invalid if `removed` (incl. itself). */
-function descendantBoneIds(bones: Bone[], removed: string): Set<string> {
+export function descendantBoneIds(bones: Bone[], removed: string): Set<string> {
   const byParent = new Map<string | null, string[]>();
   for (const b of bones) {
     const list = byParent.get(b.parentId) ?? [];
@@ -174,6 +214,7 @@ export const useModel = create<ModelState>((set, get) => ({
   cubes: [],
   bones: [],
   textures: [],
+  activeTexture: null,
   resolution: [256, 256],
   selectedId: null,
   selectedKind: null,
@@ -184,7 +225,7 @@ export const useModel = create<ModelState>((set, get) => ({
     set((state) => {
       const n = maxIdNumber(state.cubes.map((c) => c.id), "cube-") + 1;
       const id = `cube-${n}`;
-      const row = state.cubes.length;
+      const row = 0;
       const cube: Cube = {
         id,
         name: `Cube ${n}`,
@@ -195,6 +236,7 @@ export const useModel = create<ModelState>((set, get) => ({
         color: CUBE_COLORS[(n - 1) % CUBE_COLORS.length],
         marker: 0,
         boneId: state.selectedKind === "bone" ? state.selectedId : null,
+        faces: newTextureFaces(state),
       };
       return {
         past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
@@ -259,6 +301,94 @@ export const useModel = create<ModelState>((set, get) => ({
 
   select: (selectedId, selectedKind) =>
     set({ selectedId, selectedKind: selectedId ? (selectedKind ?? "cube") : null }),
+
+  addTexture: (t) =>
+    set((state) => ({
+      past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+      future: [],
+      textures: [...state.textures, t],
+      activeTexture: state.textures.length,
+    })),
+
+  removeTexture: (index) =>
+    set((state) => ({
+      past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+      future: [],
+      textures: state.textures.filter((_, i) => i !== index),
+      activeTexture:
+        state.activeTexture == null
+          ? null
+          : state.activeTexture === index
+            ? null
+            : state.activeTexture > index
+              ? state.activeTexture - 1
+              : state.activeTexture,
+    })),
+
+  createTexture: (name, res) =>
+    set((state) => {
+      const [w, h] = res ?? state.resolution;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, w, h);
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        textures: [...state.textures, { name, source: canvas.toDataURL("image/png") }],
+        activeTexture: state.textures.length,
+      };
+    }),
+
+  setActiveTexture: (activeTexture) => set({ activeTexture }),
+
+  commitTexturePixels: (dataUrl, updates) =>
+    set((state) => {
+      const idx = state.activeTexture;
+      if (idx == null || !state.textures[idx]) return {};
+      const textures = state.textures.map((t, i) => (i === idx ? { ...t, source: dataUrl } : t));
+      // Global updates (no cubeId) vs per-cube updates
+      const globalByFace = new Map<FaceName, FaceUV>();
+      const perCube = new Map<string, Map<FaceName, FaceUV>>();
+      for (const u of updates.faces) {
+        if (u.cubeId) {
+          const m = perCube.get(u.cubeId) ?? new Map<FaceName, FaceUV>();
+          m.set(u.face, u.uv);
+          perCube.set(u.cubeId, m);
+        } else {
+          globalByFace.set(u.face, u.uv);
+        }
+      }
+      const cubes = state.cubes.map((c) => {
+        const own = perCube.get(c.id);
+        if (!own && globalByFace.size === 0) return c;
+        let changed = false;
+        const faces: CubeFaces = { ...(c.faces ?? {}) };
+        for (const face of FACE_NAMES) {
+          const targeted = own?.get(face) ?? globalByFace.get(face);
+          if (!targeted) continue;
+          if (
+            !faces[face] ||
+            faces[face]!.uv[0] !== targeted[0] ||
+            faces[face]!.uv[1] !== targeted[1] ||
+            faces[face]!.uv[2] !== targeted[2] ||
+            faces[face]!.uv[3] !== targeted[3]
+          ) {
+            faces[face] = { uv: [...targeted] as FaceUV, texture: idx };
+            changed = true;
+          }
+        }
+        return changed ? { ...c, faces } : c;
+      });
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        textures,
+        cubes,
+      };
+    }),
 
   beginTransform: () =>
     set((state) => ({
@@ -328,6 +458,7 @@ export const useModel = create<ModelState>((set, get) => ({
       future: [...state.future, snapshot(state)],
       cubes: prev.cubes,
       bones: prev.bones,
+      textures: prev.textures,
       selectedId: prev.selectedId,
       selectedKind: prev.selectedKind,
     });
@@ -342,6 +473,7 @@ export const useModel = create<ModelState>((set, get) => ({
       past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
       cubes: next.cubes,
       bones: next.bones,
+      textures: next.textures,
       selectedId: next.selectedId,
       selectedKind: next.selectedKind,
     });
@@ -355,6 +487,7 @@ export const useModel = create<ModelState>((set, get) => ({
       cubes: data.cubes,
       bones: data.bones ?? [],
       textures: data.textures ?? [],
+      activeTexture: (data.textures ?? []).length > 0 ? 0 : null,
       resolution: data.resolution ?? [256, 256],
       selectedId: null,
       selectedKind: null,
@@ -365,6 +498,44 @@ export const selectSelectedCube = (state: ModelState) =>
   state.selectedKind === "cube"
     ? state.cubes.find((c) => c.id === state.selectedId) ?? null
     : null;
+
+/** Describe the painted-face overlay for the texture editor's 2D canvas. */
+export interface FaceOverlay {
+  kind: "cube" | "model";
+  id?: string;
+  name: string;
+  faces: CubeFaces;
+  resolution: [number, number];
+}
+
+/** Show the selected cube's faces (or all faces when nothing is selected) as editor-colored wireframes. */
+// NOTE: zustand selectors must return a stable reference — the result is
+// cached per state object, otherwise React loops on getSnapshot.
+let overlayCache: { state: ModelState; result: FaceOverlay | null } | null = null;
+export const selectFaceOverlay = (state: ModelState): FaceOverlay | null => {
+  if (overlayCache?.state === state) return overlayCache.result;
+  let result: FaceOverlay | null;
+  if (state.activeTexture == null) {
+    result = null;
+  } else if (state.selectedKind === "cube" && state.selectedId) {
+    const cube = state.cubes.find((c) => c.id === state.selectedId);
+    result = cube
+      ? { kind: "cube", id: cube.id, name: cube.name, faces: cube.faces ?? {}, resolution: state.resolution }
+      : null;
+  } else {
+    result = {
+      kind: "model",
+      name: state.name,
+      faces: state.cubes.reduce((acc, c) => {
+        for (const face of FACE_NAMES) if (c.faces?.[face]) acc[face] = c.faces![face]!;
+        return acc;
+      }, {} as CubeFaces),
+      resolution: state.resolution,
+    };
+  }
+  overlayCache = { state, result };
+  return result;
+};
 
 // Dev-only hook for live testing / debugging in the browser
 if (import.meta.env.DEV) {
@@ -387,6 +558,23 @@ export function boneAncestors(bones: Bone[], id: string | null): Bone[] {
     cur = cur.parentId ? byId.get(cur.parentId) ?? null : null;
   }
   return out;
+}
+
+/** Blank per-face UV slots bound to the active texture (for new cubes). */
+function newTextureFaces(state: {
+  activeTexture: number | null;
+  resolution: [number, number];
+}): CubeFaces | undefined {
+  if (state.activeTexture == null) return undefined;
+  const [w, h] = state.resolution;
+  return {
+    north: { uv: [0, 0, w, h], texture: state.activeTexture },
+    east: { uv: [0, 0, w, h], texture: state.activeTexture },
+    south: { uv: [0, 0, w, h], texture: state.activeTexture },
+    west: { uv: [0, 0, w, h], texture: state.activeTexture },
+    up: { uv: [0, 0, w, h], texture: state.activeTexture },
+    down: { uv: [0, 0, w, h], texture: state.activeTexture },
+  };
 }
 
 /** True if the cube itself or any bone above it is hidden. */

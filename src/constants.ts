@@ -3,7 +3,7 @@ import { create } from "zustand";
 export type Screen = "menu" | "editor";
 export type Tab = "Model" | "Texture" | "Animation" | "AI";
 export type ModelTools = "Select" | "Move" | "Rotate" | "Scale";
-export type TextureTools = "Brush" | "Pencil" | "Eraser" | "Fill";interface AppState {
+export type TextureTools = "Brush" | "Pencil" | "Eraser" | "Fill" | "Picker";interface AppState {
     screen: Screen;
     tab: Tab;
     modelTool: ModelTools;

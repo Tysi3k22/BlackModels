@@ -22,26 +22,17 @@ export default function ModelEditor() {
     const cubesCount = useModel((s) => s.cubes.length);
     const bonesCount = useModel((s) => s.bones.length);
 
-    const undo = useModel((s) => s.undo);
-    const redo = useModel((s) => s.redo);
 
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Delete" || e.key === "Backspace") {
                 e.preventDefault();
                 deleteSelected();
-            } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-                e.preventDefault();
-                if (e.shiftKey) redo();
-                else undo();
-            } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
-                e.preventDefault();
-                redo();
             }
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, [deleteSelected, undo, redo]);
+    }, [deleteSelected]);
 
     return (
         <main className="flex min-h-0 w-full flex-1 flex-row items-stretch justify-start">

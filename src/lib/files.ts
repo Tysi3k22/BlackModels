@@ -64,3 +64,47 @@ export async function openTextFile(
     input.click();
   });
 }
+
+/** Opens an image file and returns it as a base64 data URL. */
+export async function openImageFile(): Promise<
+  { dataUrl: string; name: string } | null
+> {
+  if (isTauri()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const { readFile } = await import("@tauri-apps/plugin-fs");
+    const path = await open({
+      title: "Import texture",
+      multiple: false,
+      filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+    });
+    if (typeof path !== "string") return null;
+    const bytes = await readFile(path);
+    // Convert to PNG data URL (uniform for the canvas pipeline)
+    const blob = new Blob([bytes], { type: "image/png" });
+    const dataUrl = await blobToDataUrl(blob);
+    return { dataUrl, name: (path.split(/[\\/]/).pop() ?? "texture").replace(/\.[^.]+$/, "") };
+  }
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/gif,image/webp";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve({ dataUrl: reader.result as string, name: file.name.replace(/\.[^.]+$/, "") });
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  });
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}

@@ -1,4 +1,4 @@
-import { openTextFile, saveTextFile } from "./files";
+import { saveTextFile } from "./files";
 import { pushRecent } from "./recent";
 import {
   BB_MARKER_COLORS,
@@ -163,19 +163,6 @@ export function parseBbmodel(json: string): ParsedModel {
     textures,
     resolution,
   };
-}
-
-export async function importBbmodel(): Promise<"ok" | "cancelled" | "error"> {
-  try {
-    const file = await openTextFile([BB_FILTER]);
-    if (!file) return "cancelled";
-    const data = parseBbmodel(file.contents);
-    useModel.getState().importProject(data);
-    return "ok";
-  } catch (e) {
-    console.error("Failed to import .bbmodel", e);
-    return "error";
-  }
 }
 
 function toBbElement(cube: Cube): BbElement {

@@ -81,7 +81,12 @@ interface ParsedModel {
   resolution: [number, number];
 }
 
-function toCube(el: BbElement, index: number, boneId: string | null): Cube {
+function toCube(
+  el: BbElement,
+  index: number,
+  boneId: string | null,
+  inHitbox = false
+): Cube {
   return {
     id: el.uuid ?? `cube-${index + 1}`,
     name: el.name || `Cube ${index + 1}`,
@@ -98,7 +103,7 @@ function toCube(el: BbElement, index: number, boneId: string | null): Cube {
     color: BB_MARKER_COLORS[((el.color ?? 0) % BB_MARKER_COLORS.length + BB_MARKER_COLORS.length) % BB_MARKER_COLORS.length],
     faces: el.faces as CubeFaces | undefined,
     boneId,
-    hidden: el.visibility === false ? true : undefined,
+    hidden: el.visibility === false || inHitbox ? true : undefined,
   };
 }
 
@@ -112,6 +117,9 @@ export function parseBbmodel(json: string): ParsedModel {
   const bones: Bone[] = [];
   const boneIdByUuid = new Map<string, string>(); // bb uuid -> bone id
   const cubeParent = new Map<string, string | null>(); // cube uuid -> bone id
+  // Blockbench convention: everything under a group named "hitbox" is a
+  // collision marker, not rendered geometry — import it hidden.
+  const hitboxGroups = new Set<string>();
 
   const usedIds = new Set<string>();
   const boneIdFor = (bbUuid: string): string => {
@@ -131,6 +139,8 @@ export function parseBbmodel(json: string): ParsedModel {
       if (!g || typeof g !== "object" || !Array.isArray(g.children)) continue;
       const id = boneIdFor(g.uuid ?? `bone-${bones.length + 1}`);
       boneIdByUuid.set(g.uuid ?? id, id);
+      const inHitbox = hitboxGroups.has(parentBoneId ?? "") || g.name.toLowerCase() === "hitbox";
+      if (inHitbox) hitboxGroups.add(id);
       bones.push({
         id,
         name: g.name || "Group",
@@ -139,7 +149,7 @@ export function parseBbmodel(json: string): ParsedModel {
         parentId: parentBoneId,
         marker: g.color,
         color: BB_MARKER_COLORS[((g.color ?? 0) % BB_MARKER_COLORS.length + BB_MARKER_COLORS.length) % BB_MARKER_COLORS.length],
-        hidden: g.visibility === false ? true : undefined,
+        hidden: g.visibility === false || inHitbox ? true : undefined,
       });
       walk(g.children, id);
     }
@@ -148,7 +158,10 @@ export function parseBbmodel(json: string): ParsedModel {
 
   const cubes = data.elements
     .filter((el) => el.type === "cube" || Array.isArray(el.from))
-    .map((el, i) => toCube(el, i, cubeParent.get(el.uuid ?? "") ?? null));
+    .map((el, i) => {
+      const parentId = cubeParent.get(el.uuid ?? "") ?? null;
+      return toCube(el, i, parentId, parentId != null && hitboxGroups.has(parentId));
+    });
 
   const textures: ProjectTexture[] = (data.textures ?? [])
     .filter((t) => typeof t.source === "string" && t.source.startsWith("data:"))

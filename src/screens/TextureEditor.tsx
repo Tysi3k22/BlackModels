@@ -9,8 +9,8 @@ import {
   useModel,
 } from "../stores/modelStore";
 import { openImageFile } from "../lib/files";
+import { EditorScene } from "../components/Viewport";
 
-export default function TextureEditor() {
 const tools: TextureTools[] = ["Brush", "Pencil", "Eraser", "Fill", "Picker"];
 
 const toolCursor: Record<TextureTools, string> = {
@@ -26,6 +26,8 @@ const PALETTE = [
   "#5d8c3a", "#3d6ea5", "#6f4e9c", "#8a5a44", "#7a7a7a",
 ];
 
+import { floodFillAt, paintLine, paintSquare } from "../lib/paint";
+
 const OVERLAY_COLORS: Record<FaceName, string> = {
   north: "#4ea1ff",
   east: "#ffd166",
@@ -34,16 +36,6 @@ const OVERLAY_COLORS: Record<FaceName, string> = {
   up: "#a78bfa",
   down: "#f97316",
 };
-
-function rgbaOf(hex: string): [number, number, number, number] {
-  const v = hex.replace("#", "");
-  return [
-    parseInt(v.slice(0, 2), 16),
-    parseInt(v.slice(2, 4), 16),
-    parseInt(v.slice(4, 6), 16),
-    255,
-  ];
-}
 
 /** Ensure the painted cube's faces are bound to the active texture. */
 function overlayCubeUpdates(
@@ -58,27 +50,55 @@ function overlayCubeUpdates(
   return out;
 }
 
-/** Paintable 2D view of the active texture with UV face rects. */
 function PaintCanvas({ tex }: { tex: ProjectTexture }) {
   const tool = useApp((s) => s.textureTool);
-  const [color, setColor] = useState("#da6c2c");
-  const [brushSize, setBrushSize] = useState(2);
+  const color = useApp((s) => s.textureColor);
+  const setColor = useApp((s) => s.setTextureColor);
+  const brushSize = useApp((s) => s.textureBrushSize);
+  const setBrushSize = useApp((s) => s.setTextureBrushSize);
   const commitTexturePixels = useModel((s) => s.commitTexturePixels);
   const overlay = useModel(selectFaceOverlay);
   const resolution = useModel((s) => s.resolution);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
-  // Pristine bitmap of the current texture; strokes paint on top of it.
   const pristine = useRef<HTMLImageElement | null>(null);
   const [ready, setReady] = useState(0);
   const stroke = useRef<{ last: [number, number] } | null>(null);
 
   const [resW, resH] = resolution;
-  const fit = Math.min(512 / resW, 640 / resH, 4);
-  const dispW = Math.round(resW * fit);
-  const dispH = Math.round(resH * fit);
+  const areaRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const [area, setArea] = useState<[number, number]>([256, 256]);
 
-  // (Re)load the bitmap whenever the committed texture changes (also undo).
+  useEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setArea([el.clientWidth, el.clientHeight]));
+    ro.observe(el);
+    setArea([el.clientWidth, el.clientHeight]);
+    return () => ro.disconnect();
+  }, []);
+
+  const autoZoom = Math.max(0.25, Math.min((area[0] - 32) / resW, (area[1] - 32) / resH));
+  const currentZoom = zoom ?? autoZoom;
+  const dispW = Math.round(resW * currentZoom);
+  const dispH = Math.round(resH * currentZoom);
+
+  useEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom((z) => {
+        const prev = z ?? autoZoom;
+        const newZoom = prev * (e.deltaY > 0 ? 0.8 : 1.25);
+        return Math.max(0.1, Math.min(newZoom, 32));
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [autoZoom]);
+
   useEffect(() => {
     const img = new Image();
     img.onload = () => {
@@ -94,7 +114,6 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
     img.src = tex.source;
   }, [tex.source, resW, resH]);
 
-  // UV face rect overlay
   useEffect(() => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext("2d");
@@ -129,26 +148,6 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
     [resW, resH]
   );
 
-  const paintSquare = (ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, erase: boolean) => {
-    const half = Math.floor(size / 2);
-    const x = cx - half;
-    const y = cy - half;
-    if (erase) ctx.clearRect(x, y, size, size);
-    else {
-      ctx.fillStyle = color;
-      ctx.fillRect(x, y, size, size);
-    }
-  };
-
-  const paintLine = (ctx: CanvasRenderingContext2D, from: [number, number], to: [number, number], size: number, erase: boolean) => {
-    const dx = to[0] - from[0];
-    const dy = to[1] - from[1];
-    const steps = Math.max(Math.abs(dx), Math.abs(dy), 1);
-    for (let i = 0; i <= steps; i++) {
-      paintSquare(ctx, Math.round(from[0] + (dx * i) / steps), Math.round(from[1] + (dy * i) / steps), size, erase);
-    }
-  };
-
   const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!pristine.current) return;
     const hit = toPx(e);
@@ -165,12 +164,12 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
       return;
     }
     if (tool === "Fill") {
-      floodFillAt(ctx, hit[0], hit[1], color);
+      floodFillAt(ctx, hit[0], hit[1], color, resW, resH);
       commit();
       return;
     }
     stroke.current = { last: hit };
-    paintSquare(ctx, hit[0], hit[1], tool === "Pencil" ? 1 : brushSize, tool === "Eraser");
+    paintSquare(ctx, hit[0], hit[1], tool === "Pencil" ? 1 : brushSize, tool === "Eraser", color);
   };
 
   const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -178,7 +177,7 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
     const hit = toPx(e);
     if (!hit) return;
     const ctx = canvasRef.current!.getContext("2d")!;
-    paintLine(ctx, stroke.current.last, hit, tool === "Pencil" ? 1 : brushSize, tool === "Eraser");
+    paintLine(ctx, stroke.current.last, hit, tool === "Pencil" ? 1 : brushSize, tool === "Eraser", color);
     stroke.current = { last: hit };
   };
 
@@ -189,7 +188,6 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
     }
   };
 
-  /** Send the canvas bitmap back to the store (one undo step per stroke). */
   const commit = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -197,49 +195,52 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
-      <div className="flex flex-col items-center gap-2">
-        <div className="relative" style={{ width: dispW, height: dispH }}>
-          <canvas
-            ref={canvasRef}
-            width={resW}
-            height={resH}
-            style={{
-              width: dispW,
-              height: dispH,
-              imageRendering: "pixelated",
-              cursor: toolCursor[tool],
-              background:
-                "repeating-conic-gradient(#2a2c31 0% 25%, #1d1f23 0% 50%) 0 0 / 16px 16px",
-            }}
-            onPointerDown={onDown}
-            onPointerMove={onMove}
-            onPointerUp={onUp}
-          />
-          <canvas
-            ref={overlayRef}
-            width={resW}
-            height={resH}
-            className="pointer-events-none absolute inset-0"
-            style={{ width: dispW, height: dispH, imageRendering: "pixelated" }}
-          />
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={areaRef}
+        className="flex min-h-0 flex-1 overflow-auto bg-[#131418]"
+      >
+        <div className="m-auto p-4">
+          <div
+            className="relative shrink-0 border border-border shadow-lg"
+            style={{ width: dispW, height: dispH }}
+          >
+            <canvas
+              ref={canvasRef}
+              width={resW}
+              height={resH}
+              style={{
+                width: dispW,
+                height: dispH,
+                imageRendering: "pixelated",
+                cursor: toolCursor[tool],
+                touchAction: "none",
+                background:
+                  "repeating-conic-gradient(#2a2c31 0% 25%, #1d1f23 0% 50%) 0 0 / 16px 16px",
+              }}
+              onPointerDown={onDown}
+              onPointerMove={onMove}
+              onPointerUp={onUp}
+            />
+            <canvas
+              ref={overlayRef}
+              width={resW}
+              height={resH}
+              className="pointer-events-none absolute inset-0"
+              style={{ width: dispW, height: dispH, imageRendering: "pixelated" }}
+            />
+          </div>
         </div>
-        <div className="text-[11px] text-neutral-500">
-          {resW}×{resH} px ·{" "}
-          {overlay
-            ? overlay.kind === "cube"
-              ? `painting ${overlay.name}`
-              : "all faces view"
-            : "no faces bound — select a cube in the Model tab or paint freely"}
-          {tool === "Brush" && ` · size ${brushSize}`}
-        </div>
-        <div className="flex flex-wrap items-center justify-center gap-1">
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-border bg-panel px-2 py-1.5">
+        <div className="flex items-center gap-1">
           {PALETTE.map((c) => (
             <button
               key={c}
               onClick={() => setColor(c)}
               title={c}
-              className={`size-5 rounded border ${
+              className={`size-4 rounded border ${
                 color === c ? "border-accent ring-1 ring-accent" : "border-border"
               }`}
               style={{ backgroundColor: c }}
@@ -249,57 +250,31 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
             type="color"
             value={color}
             onChange={(e) => setColor(e.target.value)}
-            className="size-5 cursor-pointer rounded border border-border bg-transparent"
+            className="size-4 cursor-pointer rounded border border-border bg-transparent p-0"
             title="Custom color"
           />
-          <span className="mx-1 h-4 w-px bg-border" />
+        </div>
+        <span className="h-3 w-px bg-border" />
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-neutral-500">Size</span>
           {[1, 2, 4, 8].map((s) => (
             <button
               key={s}
               onClick={() => setBrushSize(s)}
-              className={`rounded px-1.5 py-0.5 text-[11px] ${
+              className={`rounded px-1 text-[10px] ${
                 brushSize === s ? "bg-accent/20 text-accent" : "text-neutral-400 hover:bg-panel-2"
               }`}
             >
-              {s}px
+              {s}
             </button>
           ))}
         </div>
       </div>
     </div>
   );
-
-  /** Flood fill starting at (x, y) matching the exact source pixel. */
-  function floodFillAt(ctx: CanvasRenderingContext2D, x: number, y: number, hex: string) {
-    const img = ctx.getImageData(0, 0, resW, resH);
-    const d = img.data;
-    const start = (y * resW + x) * 4;
-    const target = [d[start], d[start + 1], d[start + 2], d[start + 3]];
-    const [nr, ng, nb, na] = rgbaOf(hex);
-    if (target[0] === nr && target[1] === ng && target[2] === nb && target[3] === na) return;
-    const seen = new Uint8Array(resW * resH);
-    const stack: [number, number][] = [[x, y]];
-    while (stack.length) {
-      const [cx, cy] = stack.pop()!;
-      if (cx < 0 || cy < 0 || cx >= resW || cy >= resH) continue;
-      const idx = cy * resW + cx;
-      if (seen[idx]) continue;
-      seen[idx] = 1;
-      const o = idx * 4;
-      if (
-        d[o] !== target[0] || d[o + 1] !== target[1] ||
-        d[o + 2] !== target[2] || d[o + 3] !== target[3]
-      )
-        continue;
-      d[o] = nr;
-      d[o + 1] = ng;
-      d[o + 2] = nb;
-      d[o + 3] = na;
-      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
-    }
-    ctx.putImageData(img, 0, 0);
-  }
 }
+
+export default function TextureEditor() {
     const textureTool = useApp((state) => state.textureTool);
     const setTextureTool = useApp((state) => state.setTextureTool);
     const textures = useModel((s) => s.textures);
@@ -317,53 +292,57 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
     };
 
     return (
-        <main className="flex h-full w-full flex-row items-stretch justify-start">
-            <div id="leftContainer" className="flex w-1/8 min-w-44 flex-col">    
-                <PanelTitle>Tools</PanelTitle>
-                {
-                    tools.map((tool) => (
+        <main className="flex min-h-0 w-full flex-1 flex-row items-stretch">
+            {/* Left: tools and 2D canvas */}
+            <aside className="flex w-80 shrink-0 flex-col border-r border-border">
+                <PanelTitle>TOOLS</PanelTitle>
+                <div className="flex flex-wrap gap-1 px-2 pb-2">
+                    {tools.map((tool) => (
                         <ToolButton
                             key={tool}
                             label={tool}
                             active={textureTool === tool}
                             onClick={() => setTextureTool(tool)}
                         />
-                    ))
-                }
+                    ))}
+                </div>
+                
                 <Divider />
-                <p className="px-3 py-2 text-[11px] leading-5 text-neutral-500">
-                    Select a cube in the Model tab to paint just its faces, or
-                    paint the whole texture freely. Every stroke is one undo step.
-                </p>
-            </div>
-
-
-            <div id="middleContainer" className="flex min-h-0 w-full flex-col">
+                
+                <div className="flex h-8 shrink-0 items-center border-b border-border bg-panel px-3 text-[11px] font-semibold tracking-widest text-neutral-500">
+                    TEXTURE{tex ? <span className="ml-2 font-normal normal-case tracking-normal text-neutral-400">{tex.name}</span> : null}
+                </div>
+                
                 {tex ? (
                     <PaintCanvas tex={tex} />
                 ) : (
-                    <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-neutral-500">
-                        <p>No textures in this project yet.</p>
-                        <div className="flex gap-2">
+                    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center text-sm text-neutral-500">
+                        <p>No textures yet.</p>
+                        <div className="flex flex-col gap-2">
                             <button
                                 onClick={importImage}
                                 className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-black hover:brightness-110"
                             >
                                 Import image
                             </button>
-                            <button
-                                onClick={() => createTexture(`texture-${textures.length + 1}`)}
-                                className="rounded border border-border px-3 py-1.5 text-sm text-neutral-200 hover:bg-panel-2"
-                            >
-                                New blank texture
-                            </button>
                         </div>
                     </div>
                 )}
-            </div>
+            </aside>
 
-            <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col">
-                <PanelTitle>Textures</PanelTitle>
+            {/* Center: 3D preview with the painted texture */}
+            <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <div className="flex h-8 shrink-0 items-center border-b border-border bg-panel px-3 text-[11px] font-semibold tracking-widest text-neutral-500">
+                    3D PREVIEW
+                </div>
+                <div className="relative min-h-0 flex-1">
+                    <EditorScene mode="texture" />
+                </div>
+            </section>
+
+            {/* Right: texture list */}
+            <aside className="flex w-52 shrink-0 flex-col border-l border-border">
+                <PanelTitle>TEXTURES</PanelTitle>
                 <div className="flex gap-1.5 px-2 pb-2">
                     <button
                         onClick={importImage}
@@ -423,7 +402,7 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
                         active for painting &amp; new cubes
                     </div>
                 )}
-            </div>
+            </aside>
         </main>
     )
-} 
+}

@@ -300,7 +300,19 @@ export const useModel = create<ModelState>((set, get) => ({
     }),
 
   select: (selectedId, selectedKind) =>
-    set({ selectedId, selectedKind: selectedId ? (selectedKind ?? "cube") : null }),
+    set((state) => {
+      const kind: SelectedKind | null = selectedId ? (selectedKind ?? "cube") : null;
+      // Picking a cube also focuses the texture file that cube is painted
+      // with, so the texture editor shows the whole right atlas.
+      if (kind === "cube" && selectedId) {
+        const cube = state.cubes.find((c) => c.id === selectedId);
+        const texIdx = cube ? cubeTextureIndex(cube) : null;
+        if (texIdx != null && state.textures[texIdx]) {
+          return { selectedId, selectedKind: kind, activeTexture: texIdx };
+        }
+      }
+      return { selectedId, selectedKind: kind };
+    }),
 
   addTexture: (t) =>
     set((state) => ({
@@ -558,6 +570,24 @@ export function boneAncestors(bones: Bone[], id: string | null): Bone[] {
     cur = cur.parentId ? byId.get(cur.parentId) ?? null : null;
   }
   return out;
+}
+
+/** Most common texture index across a cube's faces (null when untextured). */
+export function cubeTextureIndex(cube: Cube): number | null {
+  const counts = new Map<number, number>();
+  for (const face of FACE_NAMES) {
+    const t = cube.faces?.[face]?.texture;
+    if (t != null) counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  let best: number | null = null;
+  let bestCount = 0;
+  for (const [idx, count] of counts) {
+    if (count > bestCount) {
+      best = idx;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 /** Blank per-face UV slots bound to the active texture (for new cubes). */

@@ -139,11 +139,11 @@ Resource Pack / Plugin
 
 ## Phase 2 — Minecraft Modeling
 
-* [ ] Bones
-* [ ] Bone hierarchy
-* [ ] Parenting
-* [ ] Pivot points
-* [ ] Textures
+* [x] Bones
+* [x] Bone hierarchy
+* [x] Parenting
+* [x] Pivot points
+* [x] Textures
 * [ ] UV mapping
 * [ ] Materials
 * [ ] Minecraft-specific constraints

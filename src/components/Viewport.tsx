@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
 import {
   Edges,
@@ -38,6 +38,9 @@ const isGizmoBusy = () =>
   (gizmo.controls as unknown as { axis: string | null } | null)?.axis != null;
 
 const DEG = Math.PI / 180;
+
+/** True in the Texture tab: every cube (also the selected one) is drawn in place inside its bone. */
+const TextureModeContext = createContext(false);
 
 // Blockbench applies group/cube rotations (degrees) in Z-Y-X order.
 const ROT_ORDER = "ZYX" as const;
@@ -137,7 +140,14 @@ function cubeMaterial(
     Object.values(cube.faces).some((f) => f?.texture != null && textures[f.texture]);
 
   if (!anyTextured) {
-    return <meshStandardMaterial color={cube.color} transparent opacity={0.9} side={side} />;
+    return (
+      <meshStandardMaterial
+        color={cube.color}
+        transparent
+        opacity={0.9}
+        side={side}
+      />
+    );
   }
 
   return (
@@ -170,17 +180,74 @@ function cubeMaterial(
   );
 }
 
-/** Cube geometry with per-face UVs from bbmodel data. */
+/** Cube geometry with per-face UVs from bbmodel data. `cube` may be null. */
 function useCubeGeometry(
-  cube: Cube,
+  cube: Cube | null,
   resolution: [number, number]
 ): THREE.BoxGeometry {
   return useMemo(() => {
     const g = new THREE.BoxGeometry(1, 1, 1);
-    applyFaceUVs(g, cube.faces, resolution);
+    if (cube) applyFaceUVs(g, cube.faces, resolution);
     return g;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cube.faces, resolution[0], resolution[1]]);
+  }, [cube?.id, cube?.faces, resolution[0], resolution[1]]);
+}
+
+import { ThreeEvent } from "@react-three/fiber";
+import { getPaintContext, floodFillAt, paintLine, paintSquare } from "../lib/paint";
+
+const gridVertexShader = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const gridFragmentShader = `
+  uniform vec2 uResolution;
+  uniform vec3 uColor;
+  uniform float uAlpha;
+  varying vec2 vUv;
+  
+  void main() {
+    vec2 px = vUv * uResolution;
+    vec2 grid = fract(px);
+    
+    // Smooth thin lines using fwidth for perfect 1px rendering at any zoom
+    vec2 fw = fwidth(px);
+    vec2 dist = min(grid, 1.0 - grid);
+    
+    vec2 edge = smoothstep(fw * 0.0, fw * 1.5, dist);
+    float alpha = 1.0 - min(edge.x, edge.y);
+    
+    if (alpha < 0.05) discard;
+    gl_FragColor = vec4(uColor, uAlpha * alpha);
+  }
+`;
+
+function PixelGridMaterial({ resolution, attach }: { resolution: [number, number]; attach?: string }) {
+  const uniforms = useMemo(
+    () => ({
+      uResolution: { value: new THREE.Vector2(resolution[0], resolution[1]) },
+      uColor: { value: new THREE.Color("#000000") },
+      uAlpha: { value: 0.65 },
+    }),
+    [resolution[0], resolution[1]]
+  );
+
+  return (
+    <shaderMaterial
+      attach={attach}
+      uniforms={uniforms}
+      vertexShader={gridVertexShader}
+      fragmentShader={gridFragmentShader}
+      transparent
+      depthWrite={false}
+      polygonOffset
+      polygonOffsetFactor={-1}
+    />
+  );
 }
 
 /**
@@ -193,24 +260,38 @@ function CubeObject({
   offset,
   textures,
   resolution,
+  forceVisible = false,
 }: {
   cube: Cube;
   /** Bone pivot in model space (omit for root cubes). */
   offset?: Vec3;
   textures: ProjectTexture[];
   resolution: [number, number];
+  /** Draw even when selected (texture mode selection highlight). */
+  forceVisible?: boolean;
 }) {
   const select = useModel((s) => s.select);
   const selectedId = useModel((s) => s.selectedId);
   const bones = useModel((s) => s.bones);
+  const activeTexture = useModel((s) => s.activeTexture);
+  const commitTexturePixels = useModel((s) => s.commitTexturePixels);
+  
+  const textureTool = useApp((s) => s.textureTool);
+  const textureColor = useApp((s) => s.textureColor);
+  const textureBrushSize = useApp((s) => s.textureBrushSize);
+  const setTextureColor = useApp((s) => s.setTextureColor);
+
   const [ifrom, ito] = useMemo(
     () => inflateBox(cube.from, cube.to, cube.inflate),
     [cube.from, cube.to, cube.inflate]
   );
   const geometry = useCubeGeometry(cube, resolution);
+  const textureMode = useContext(TextureModeContext);
+  const stroke = useRef<{ last: [number, number] } | null>(null);
 
-  // The selected cube is drawn by <SelectedCube/> (with gizmo) instead
-  if (cube.id === selectedId || isCubeHidden(cube, bones)) return null;
+  // The selected cube is drawn by <SelectedCube/> (with gizmo) instead —
+  // except in texture mode, where it stays in its bone like every other cube.
+  if ((cube.id === selectedId && !forceVisible && !textureMode) || isCubeHidden(cube, bones)) return null;
 
   const pivot: Vec3 = offset ?? [0, 0, 0];
   const o: Vec3 = cube.origin;
@@ -226,18 +307,100 @@ function CubeObject({
     Math.max(1e-6, ito[2] - ifrom[2]),
   ];
 
+  const handlePointerDown = async (e: ThreeEvent<PointerEvent>) => {
+    if (!textureMode) return;
+    e.stopPropagation();
+    if (activeTexture == null || !textures[activeTexture]) return;
+    if (!e.uv) return;
+    
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    const tex = textures[activeTexture];
+    const [w, h] = resolution;
+    const px = Math.floor(e.uv.x * w);
+    const py = Math.floor((1 - e.uv.y) * h);
+    const hit: [number, number] = [px, py];
+    
+    const ctx = await getPaintContext(tex, w, h);
+    
+    if (textureTool === "Picker") {
+      const d = ctx.getImageData(hit[0], hit[1], 1, 1).data;
+      if (d[3] > 0) {
+        setTextureColor(`#${[d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, "0")).join("")}`);
+      }
+      return;
+    }
+    if (textureTool === "Fill") {
+      floodFillAt(ctx, hit[0], hit[1], textureColor, w, h);
+      commitTexturePixels(ctx.canvas.toDataURL("image/png"), { faces: [] });
+      return;
+    }
+    stroke.current = { last: hit };
+    paintSquare(ctx, hit[0], hit[1], textureTool === "Pencil" ? 1 : textureBrushSize, textureTool === "Eraser", textureColor);
+  };
+  
+  const handlePointerMove = async (e: ThreeEvent<PointerEvent>) => {
+    if (!textureMode || !stroke.current) return;
+    e.stopPropagation();
+    if (activeTexture == null || !textures[activeTexture]) return;
+    if (!e.uv) return;
+    
+    const tex = textures[activeTexture];
+    const [w, h] = resolution;
+    const px = Math.floor(e.uv.x * w);
+    const py = Math.floor((1 - e.uv.y) * h);
+    const hit: [number, number] = [px, py];
+    
+    const ctx = await getPaintContext(tex, w, h);
+    paintLine(ctx, stroke.current.last, hit, textureTool === "Pencil" ? 1 : textureBrushSize, textureTool === "Eraser", textureColor);
+    stroke.current = { last: hit };
+  };
+  
+  const handlePointerUp = async () => {
+    if (!textureMode) return;
+    if (stroke.current) {
+      stroke.current = null;
+      if (activeTexture != null && textures[activeTexture]) {
+        const tex = textures[activeTexture];
+        const [w, h] = resolution;
+        const ctx = await getPaintContext(tex, w, h);
+        commitTexturePixels(ctx.canvas.toDataURL("image/png"), { faces: [] });
+      }
+    }
+  };
+
   return (
     <group
       position={groupPos}
       rotation={eulerDeg(cube.rotation)}
       onClick={(e) => {
+        if (textureMode) return;
         e.stopPropagation();
         select(cube.id, "cube");
       }}
     >
-      <mesh position={meshPos} scale={size} geometry={geometry} userData={{ clickCube: cube.id }}>
+      <mesh 
+        position={meshPos} 
+        scale={size} 
+        geometry={geometry} 
+        userData={{ clickCube: cube.id }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+      >
         {cubeMaterial(cube, textures)}
       </mesh>
+      
+      {textureMode && (
+        <mesh position={meshPos} scale={size} geometry={geometry}>
+          {BOX_FACE_ORDER.map((face, i) => (
+            <PixelGridMaterial
+              key={face}
+              attach={`material-${i}`}
+              resolution={resolution}
+            />
+          ))}
+        </mesh>
+      )}
     </group>
   );
 }
@@ -371,6 +534,10 @@ function SelectedCube() {
   const beginTransform = useModel((s) => s.beginTransform);
   const tool = useApp((s) => s.modelTool);
   const textures = useModel((s) => s.textures);
+  const resolution = useModel((s) => s.resolution);
+  // Proper per-face UV geometry — a bare <boxGeometry/> has default UVs 0–1,
+  // which painted the WHOLE texture atlas onto every face of the selection.
+  const geometry = useCubeGeometry(selected, resolution);
 
   const rigRef = useRef<Object3D>(null);
   const innerRef = useRef<Object3D>(null);
@@ -462,13 +629,13 @@ function SelectedCube() {
         <group ref={rigRef}>
           <mesh
             ref={innerRef}
+            geometry={geometry}
             userData={{ clickCube: selected.id }}
             onClick={(e) => {
               e.stopPropagation();
               select(selected.id, "cube");
             }}
           >
-            <boxGeometry />
             {cubeMaterial(selected, textures)}
             <Edges color="#4ea1ff" lineWidth={2} />
           </mesh>
@@ -615,7 +782,7 @@ function SelectedBone() {
 }
 
 /** Renders the full scene graph: root cubes, bone trees, and the selection rig. */
-function SceneContent() {
+function SceneContent({ textureMode }: { textureMode: boolean }) {
   const cubes = useModel((s) => s.cubes);
   const bones = useModel((s) => s.bones);
   const textures = useModel((s) => s.textures);
@@ -628,23 +795,29 @@ function SceneContent() {
   );
 
   return (
-    <group>
-      {rootCubes.map((cube) => (
-        <CubeObject key={cube.id} cube={cube} textures={textures} resolution={resolution} />
-      ))}
-      {rootBones.map((bone) => (
-        <BoneNode
-          key={bone.id}
-          bone={bone}
-          allCubes={cubes}
-          allBones={bones}
-          textures={textures}
-          resolution={resolution}
-        />
-      ))}
-      <SelectedCube />
-      <SelectedBone />
-    </group>
+    <TextureModeContext.Provider value={textureMode}>
+      <group>
+        {rootCubes.map((cube) => (
+          <CubeObject key={cube.id} cube={cube} textures={textures} resolution={resolution} />
+        ))}
+        {rootBones.map((bone) => (
+          <BoneNode
+            key={bone.id}
+            bone={bone}
+            allCubes={cubes}
+            allBones={bones}
+            textures={textures}
+            resolution={resolution}
+          />
+        ))}
+        {!textureMode && (
+          <>
+            <SelectedCube />
+            <SelectedBone />
+          </>
+        )}
+      </group>
+    </TextureModeContext.Provider>
   );
 }
 
@@ -659,15 +832,30 @@ function DevSceneHook() {
   return null;
 }
 
-export default function Viewport() {
+/**
+ * Shared scene for both editor modes. `mode = "model"` adds the transform
+ * gizmo; `mode = "texture"` is a lighter orbit-view for texture painting.
+ */
+export function EditorScene({ mode }: { mode: "model" | "texture" }) {
   const select = useModel((s) => s.select);
+
+  // R3F can mount before the flex layout settles, freezing the canvas at the
+  // browser default 300x150. Nudge a resize once the container has real bounds.
+  useEffect(() => {
+    const t0 = setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+    const t1 = setTimeout(() => window.dispatchEvent(new Event("resize")), 150);
+    return () => {
+      clearTimeout(t0);
+      clearTimeout(t1);
+    };
+  }, []);
 
   return (
     <Canvas
       camera={{ position: [48, 40, 48], fov: 50, near: 0.1, far: 2000 }}
       dpr={[1, 2]}
       onPointerMissed={() => {
-        if (!isGizmoBusy()) select(null);
+        if (mode === "model" && !isGizmoBusy()) select(null);
       }}
     >
       <color attach="background" args={["#16171b"]} />
@@ -688,18 +876,33 @@ export default function Viewport() {
         infiniteGrid
       />
 
-      <SceneContent />
+      <SceneContent textureMode={mode === "texture"} />
       <DevSceneHook />
 
-      <OrbitControls makeDefault enableDamping dampingFactor={0.15} />
+      <OrbitControls 
+        makeDefault 
+        enableDamping 
+        dampingFactor={0.15} 
+        mouseButtons={{
+          LEFT: mode === "texture" ? 99 as any : THREE.MOUSE.ROTATE,
+          MIDDLE: THREE.MOUSE.PAN,
+          RIGHT: THREE.MOUSE.ROTATE
+        }}
+      />
 
-      <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
-        <GizmoViewport
-          axisColors={["#ff5f56", "#7dd87d", "#5b8def"]}
-          labels={["E", "Up", "S"]}
-          labelColor="#16171b"
-        />
-      </GizmoHelper>
+      {mode === "model" && (
+        <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
+          <GizmoViewport
+            axisColors={["#ff5f56", "#7dd87d", "#5b8def"]}
+            labels={["E", "Up", "S"]}
+            labelColor="#16171b"
+          />
+        </GizmoHelper>
+      )}
     </Canvas>
   );
+}
+
+export default function Viewport() {
+  return <EditorScene mode="model" />;
 }

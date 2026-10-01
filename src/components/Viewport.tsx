@@ -22,6 +22,7 @@ import {
   boneAncestors,
   selectSelectedBone,
   selectSelectedCube,
+  textureMaterial,
   useModel,
 } from "../stores/modelStore";
 
@@ -128,6 +129,7 @@ function cubeMaterial(
   cube: {
     color: string;
     faces?: CubeFaces;
+    shade?: boolean;
     inflate?: number;
     from: Vec3;
     to: Vec3;
@@ -143,8 +145,13 @@ function cubeMaterial(
     !!cube.faces &&
     Object.values(cube.faces).some((f) => f?.texture != null && textures[f.texture]);
 
+  // shade === false: no directional lighting, the cube is drawn flat/fullbright
+  const unlit = cube.shade === false;
+
   if (!anyTextured) {
-    return (
+    return unlit ? (
+      <meshBasicMaterial color={cube.color} transparent opacity={0.9} side={side} />
+    ) : (
       <meshStandardMaterial
         color={cube.color}
         transparent
@@ -161,14 +168,86 @@ function cubeMaterial(
         const texIdx = f?.texture != null ? f.texture : undefined;
         const src = texIdx != null ? textures[texIdx]?.source : undefined;
         const tex = src ? getSharedTexture(src, texIdx) : null;
-        return tex ? (
-          <meshStandardMaterial
+        if (tex) {
+          const mat = textureMaterial(texIdx != null ? textures[texIdx] : null);
+          const faceSide =
+            mat.sides === "double"
+              ? THREE.DoubleSide
+              : mat.sides === "front"
+                ? THREE.FrontSide
+                : side;
+          const key = `${face}-${mat.renderMode}-${unlit ? "u" : "l"}`;
+          if (unlit) {
+            return mat.renderMode === "additive" ? (
+              <meshBasicMaterial
+                key={key}
+                attach={`material-${i}`}
+                map={tex}
+                side={faceSide}
+                transparent
+                blending={THREE.AdditiveBlending}
+                depthWrite={false}
+              />
+            ) : (
+              <meshBasicMaterial
+                key={key}
+                attach={`material-${i}`}
+                map={tex}
+                side={faceSide}
+                transparent
+                alphaTest={0.01}
+              />
+            );
+          }
+          if (mat.renderMode === "emissive") {
+            // fullbright: the texture lights itself regardless of scene lights
+            return (
+              <meshStandardMaterial
+                key={key}
+                attach={`material-${i}`}
+                map={tex}
+                emissive="#ffffff"
+                emissiveMap={tex}
+                emissiveIntensity={1}
+                side={faceSide}
+                transparent
+                alphaTest={0.01}
+              />
+            );
+          }
+          if (mat.renderMode === "additive") {
+            return (
+              <meshStandardMaterial
+                key={key}
+                attach={`material-${i}`}
+                map={tex}
+                side={faceSide}
+                transparent
+                blending={THREE.AdditiveBlending}
+                depthWrite={false}
+              />
+            );
+          }
+          // "default" and "layered" (layering is export-only, the preview shows the base)
+          return (
+            <meshStandardMaterial
+              key={key}
+              attach={`material-${i}`}
+              map={tex}
+              side={faceSide}
+              transparent
+              alphaTest={0.01}
+            />
+          );
+        }
+        return unlit ? (
+          <meshBasicMaterial
             key={face}
             attach={`material-${i}`}
-            map={tex}
+            color={cube.color}
             side={side}
             transparent
-            alphaTest={0.01}
+            opacity={0.9}
           />
         ) : (
           <meshStandardMaterial

@@ -59,6 +59,8 @@ export interface Cube {
   /** Blockbench inflate: expands the cube by this amount on every side. */
   inflate?: number;
   faces?: CubeFaces;
+  /** false = no directional lighting on this cube (bbmodel `shade`); default true. */
+  shade?: boolean;
   /** Marker color index (bbmodel `color`). */
   marker?: number;
   color: string;
@@ -85,10 +87,29 @@ export interface Bone {
   hidden?: boolean;
 }
 
+/** How a texture is lit/blended (mirrors bbmodel texture `render_mode`). */
+export type RenderMode = "default" | "emissive" | "additive" | "layered";
+/** Which sides of a face show the texture (bbmodel `render_sides`). */
+export type RenderSides = "auto" | "front" | "double";
+
+export interface TextureMaterial {
+  renderMode: RenderMode;
+  sides: RenderSides;
+}
+
+export const DEFAULT_MATERIAL: TextureMaterial = { renderMode: "default", sides: "auto" };
+
 export interface ProjectTexture {
   /** Base64 data URL (embedded PNG). */
   source: string;
   name: string;
+  /** Material settings; missing = defaults. */
+  material?: TextureMaterial;
+}
+
+/** Material of a texture with defaults filled in. */
+export function textureMaterial(t: ProjectTexture | null | undefined): TextureMaterial {
+  return { ...DEFAULT_MATERIAL, ...(t?.material ?? {}) };
 }
 
 export type SelectedKind = "cube" | "bone";
@@ -157,6 +178,10 @@ interface ModelState {
   removeTexture: (index: number) => void;
   /** Create a blank texture (optionally with a custom resolution). */
   createTexture: (name: string, res?: [number, number]) => void;
+  /** Change a texture's material settings (one undo step). */
+  setTextureMaterial: (index: number, patch: Partial<TextureMaterial>) => void;
+  /** Turn directional lighting on/off for one cube (one undo step). */
+  setCubeShade: (cubeId: string, shade: boolean) => void;
   /** Which texture painting tools edit. */
   setActiveTexture: (index: number | null) => void;
   /** Write painted pixels into the active texture and update face UVs. */
@@ -385,6 +410,34 @@ export const useModel = create<ModelState>((set, get) => ({
     }),
 
   setActiveTexture: (activeTexture) => set({ activeTexture }),
+
+  setTextureMaterial: (index, patch) =>
+    set((state) => {
+      const tex = state.textures[index];
+      if (!tex) return {};
+      const cur = textureMaterial(tex);
+      const next: TextureMaterial = { ...cur, ...patch };
+      if (next.renderMode === cur.renderMode && next.sides === cur.sides) return {};
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        textures: state.textures.map((t, i) => (i === index ? { ...t, material: next } : t)),
+      };
+    }),
+
+  setCubeShade: (cubeId, shade) =>
+    set((state) => {
+      const cube = state.cubes.find((c) => c.id === cubeId);
+      if (!cube || (cube.shade !== false) === shade) return {};
+      return {
+        past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
+        future: [],
+        // shade defaults to true, so only the "off" state is stored
+        cubes: state.cubes.map((c) =>
+          c.id === cubeId ? { ...c, shade: shade ? undefined : false } : c
+        ),
+      };
+    }),
 
   commitTexturePixels: (dataUrl, updates) =>
     set((state) => {

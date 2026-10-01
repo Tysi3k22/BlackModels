@@ -7,8 +7,11 @@ import {
   FaceName,
   FaceUV,
   ProjectTexture,
+  RenderMode,
+  RenderSides,
   selectFaceOverlay,
   selectSelectedCube,
+  textureMaterial,
   useModel,
 } from "../stores/modelStore";
 import { flipUV } from "../lib/uv";
@@ -513,6 +516,86 @@ function NumField({
   );
 }
 
+const RENDER_MODES: { id: RenderMode; label: string; hint: string }[] = [
+  { id: "default", label: "Default", hint: "Normal lit texture" },
+  { id: "emissive", label: "Emissive", hint: "Fullbright: the texture glows regardless of lighting" },
+  { id: "additive", label: "Additive", hint: "Adds its colors to what is behind it (glow, beams)" },
+  { id: "layered", label: "Layered", hint: "Kept for .bbmodel export; the preview shows it like Default" },
+];
+const RENDER_SIDES: { id: RenderSides; label: string; hint: string }[] = [
+  { id: "auto", label: "Auto", hint: "Double-sided only for flat (zero-thickness) cubes" },
+  { id: "front", label: "Front", hint: "Outward faces only" },
+  { id: "double", label: "Double", hint: "Visible from both sides" },
+];
+
+/** Material of the active texture + lighting toggle of the selected cube. */
+function MaterialPanel() {
+  const activeTexture = useModel((s) => s.activeTexture);
+  const tex = useModel((s) => (s.activeTexture != null ? s.textures[s.activeTexture] ?? null : null));
+  const cube = useModel(selectSelectedCube);
+  const setTextureMaterial = useModel((s) => s.setTextureMaterial);
+  const setCubeShade = useModel((s) => s.setCubeShade);
+  const mat = textureMaterial(tex);
+
+  const seg = (active: boolean) =>
+    `flex-1 rounded px-1 py-0.5 text-[11px] ${
+      active ? "bg-accent/20 text-accent" : "text-neutral-300 hover:bg-panel-2"
+    }`;
+
+  return (
+    <div className="shrink-0 border-t border-border p-2">
+      <div className="mb-1.5 text-[11px] font-semibold tracking-widest text-neutral-500">MATERIAL</div>
+      {tex && activeTexture != null ? (
+        <>
+          <div className="mb-1 text-[10px] text-neutral-500">Render mode</div>
+          <div className="mb-2 grid grid-cols-2 gap-1">
+            {RENDER_MODES.map((m) => (
+              <button
+                key={m.id}
+                title={m.hint}
+                onClick={() => setTextureMaterial(activeTexture, { renderMode: m.id })}
+                className={seg(mat.renderMode === m.id)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <div className="mb-1 text-[10px] text-neutral-500">Sides</div>
+          <div className="mb-2 flex gap-1">
+            {RENDER_SIDES.map((m) => (
+              <button
+                key={m.id}
+                title={m.hint}
+                onClick={() => setTextureMaterial(activeTexture, { sides: m.id })}
+                className={seg(mat.sides === m.id)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <p className="mb-2 text-[10px] leading-4 text-neutral-500">Select a texture to set its material.</p>
+      )}
+      <label
+        className={`flex items-center gap-2 text-[11px] select-none ${
+          cube ? "cursor-pointer text-neutral-300" : "text-neutral-600"
+        }`}
+        title="Off = no directional lighting on this cube (bbmodel “shade”)"
+      >
+        <input
+          type="checkbox"
+          disabled={!cube}
+          checked={cube ? cube.shade !== false : true}
+          onChange={(e) => cube && setCubeShade(cube.id, e.target.checked)}
+          className="accent-[var(--color-accent,#4ea1ff)]"
+        />
+        Shade selected cube
+      </label>
+    </div>
+  );
+}
+
 /** Per-face UV numbers + auto-unwrap buttons for the selected cube. */
 function UVPanel() {
   const cube = useModel(selectSelectedCube);
@@ -696,7 +779,7 @@ export default function TextureEditor() {
             </section>
 
             {/* Right: texture list */}
-            <aside className="flex w-64 shrink-0 flex-col border-l border-border">
+            <aside className="flex w-64 shrink-0 flex-col overflow-y-auto border-l border-border">
                 <PanelTitle>TEXTURES</PanelTitle>
                 <div className="flex gap-1.5 px-2 pb-2">
                     <button
@@ -750,6 +833,7 @@ export default function TextureEditor() {
                         </div>
                     ))}
                 </div>
+                <MaterialPanel />
                 <UVPanel />
                 {tex && (
                     <div className="border-t border-border p-2 text-[11px] leading-5 text-neutral-500">

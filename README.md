@@ -145,7 +145,7 @@ Resource Pack / Plugin
 * [x] Pivot points
 * [x] Textures
 * [x] UV mapping
-* [ ] Materials
+* [x] Materials
 * [ ] Minecraft-specific constraints
 
 ## Phase 3 — Blockbench Compatibility

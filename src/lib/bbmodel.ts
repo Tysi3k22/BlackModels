@@ -7,6 +7,8 @@ import {
   CubeFaces,
   FaceName,
   ProjectTexture,
+  RenderMode,
+  RenderSides,
   Vec3,
   useModel,
 } from "../stores/modelStore";
@@ -36,6 +38,7 @@ interface BbElement {
   locked?: boolean;
   autouv?: number;
   visibility?: boolean;
+  shade?: boolean;
 }
 
 interface BbGroup {
@@ -55,6 +58,8 @@ interface BbGroup {
 interface BbTexture {
   source?: string;
   name?: string;
+  render_mode?: string;
+  render_sides?: string;
 }
 
 interface BbModel {
@@ -103,6 +108,7 @@ function toCube(
     color: BB_MARKER_COLORS[((el.color ?? 0) % BB_MARKER_COLORS.length + BB_MARKER_COLORS.length) % BB_MARKER_COLORS.length],
     faces: el.faces as CubeFaces | undefined,
     boneId,
+    shade: el.shade === false ? false : undefined,
     hidden: el.visibility === false || inHitbox ? true : undefined,
   };
 }
@@ -165,7 +171,16 @@ export function parseBbmodel(json: string): ParsedModel {
 
   const textures: ProjectTexture[] = (data.textures ?? [])
     .filter((t) => typeof t.source === "string" && t.source.startsWith("data:"))
-    .map((t, i) => ({ source: t.source as string, name: t.name ?? `texture-${i}.png` }));
+    .map((t, i): ProjectTexture => {
+      const renderMode: RenderMode = (["emissive", "additive", "layered"] as const).find(
+        (m) => m === t.render_mode
+      ) ?? "default";
+      const sides: RenderSides = t.render_sides === "front" || t.render_sides === "double" ? t.render_sides : "auto";
+      const tex: ProjectTexture = { source: t.source as string, name: t.name ?? `texture-${i}.png` };
+      // Only keep non-default settings so plain models stay plain
+      if (renderMode !== "default" || sides !== "auto") tex.material = { renderMode, sides };
+      return tex;
+    });
   const resolution: [number, number] = data.resolution
     ? [data.resolution.width, data.resolution.height]
     : [256, 256];
@@ -193,6 +208,7 @@ function toBbElement(cube: Cube): BbElement {
     uuid: cube.id.includes("-") ? cube.id : randomUuid(),
   };
   if (cube.inflate !== undefined) el.inflate = cube.inflate;
+  if (cube.shade === false) el.shade = false;
   if (cube.rotation.some((r) => r !== 0)) el.rotation = cube.rotation;
   el.origin = cube.origin ?? [
     (cube.from[0] + cube.to[0]) / 2,
@@ -301,7 +317,8 @@ export function serializeBbmodel(
       namespace: "",
       id: "0",
       particle: false,
-      render_mode: "normal",
+      render_mode: t.material?.renderMode ?? "default",
+      render_sides: t.material?.sides ?? "auto",
       visible: true,
       mode: "bitmap",
       saved: false,

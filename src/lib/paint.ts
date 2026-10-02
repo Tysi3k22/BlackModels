@@ -60,6 +60,10 @@ export function floodFillAt(ctx: CanvasRenderingContext2D, x: number, y: number,
     ctx.putImageData(img, 0, 0);
 }
 
+export interface PaintWindow extends Window {
+    __paintOffscreen?: HTMLCanvasElement;
+}
+
 // Keep a shared offscreen canvas and image for 3D painting
 let offscreenCanvas: HTMLCanvasElement | null = null;
 let offscreenCtx: CanvasRenderingContext2D | null = null;
@@ -71,7 +75,7 @@ export function getPaintContext(tex: ProjectTexture, resW: number, resH: number)
         if (!offscreenCanvas) {
             offscreenCanvas = document.createElement("canvas");
             offscreenCtx = offscreenCanvas.getContext("2d")!;
-            (window as any).__paintOffscreen = offscreenCanvas;
+            (window as PaintWindow).__paintOffscreen = offscreenCanvas;
         }
         if (offscreenCanvas.width !== resW || offscreenCanvas.height !== resH) {
             offscreenCanvas.width = resW;

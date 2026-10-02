@@ -9,7 +9,7 @@ import {
   packCubes,
   toCubeFaces,
 } from "../lib/uv";
-
+import { disposeTexture } from "../lib/textureCache";
 /** bbmodel marker colors used by Blockbench (index into this palette). */
 export const BB_MARKER_COLORS = [
   "#A7E1F5", "#FF94B5", "#A6FF94", "#FFFF94", "#D49EE8",
@@ -377,7 +377,9 @@ export const useModel = create<ModelState>((set, get) => ({
       activeTexture: state.textures.length,
     })),
 
-  removeTexture: (index) =>
+  // The THREE.Texture is disposed once the list entry is gone. Undo restores the
+  // entry, and getSharedTexture() rebuilds the texture from its source on demand.
+  removeTexture: (index) => {
     set((state) => ({
       past: [...state.past, snapshot(state)].slice(-HISTORY_LIMIT),
       future: [],
@@ -390,7 +392,9 @@ export const useModel = create<ModelState>((set, get) => ({
             : state.activeTexture > index
               ? state.activeTexture - 1
               : state.activeTexture,
-    })),
+    }));
+    disposeTexture(index);
+  },
 
   createTexture: (name, res) =>
     set((state) => {

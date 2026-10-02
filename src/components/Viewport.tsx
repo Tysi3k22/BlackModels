@@ -25,6 +25,7 @@ import {
   textureMaterial,
   useModel,
 } from "../stores/modelStore";
+import { flushCanvasToLiveTexture, getSharedTexture } from "../lib/textureCache";
 
 // Minecraft coordinate system: +X = East, +Y = Up, +Z = South
 // 1 grid cell = 1 in-game pixel, 1 section (16 cells) = 1 Minecraft block
@@ -47,40 +48,6 @@ const TextureModeContext = createContext(false);
 const ROT_ORDER = "ZYX" as const;
 const eulerDeg = (r: Vec3) =>
   new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, ROT_ORDER);
-
-// Texture cache keyed by texture index — reuses the same THREE.Texture object
-// and updates its image in-place when the source changes, avoiding full reloads.
-const textureCacheByIndex = new Map<number, { tex: THREE.Texture; source: string }>();
-function getSharedTexture(source: string, index?: number): THREE.Texture | null {
-  if (index != null) {
-    const cached = textureCacheByIndex.get(index);
-    if (cached) {
-      if (cached.source !== source) {
-        // Source changed (paint stroke) — update image in place
-        const img = new Image();
-        img.onload = () => {
-          cached.tex.image = img;
-          cached.tex.needsUpdate = true;
-        };
-        img.src = source;
-        cached.source = source;
-      }
-      return cached.tex;
-    }
-  }
-  try {
-    const t = new THREE.TextureLoader().load(source);
-    t.magFilter = THREE.NearestFilter;
-    t.minFilter = THREE.NearestFilter;
-    t.colorSpace = THREE.SRGBColorSpace;
-    if (index != null) {
-      textureCacheByIndex.set(index, { tex: t, source });
-    }
-    return t;
-  } catch {
-    return null;
-  }
-}
 
 // BoxGeometry face order: px, nx, py, ny, pz, nz
 // Minecraft/bbmodel: east=+X, west=-X, up=+Y, down=-Y, south=+Z, north=-Z
@@ -278,7 +245,7 @@ function useCubeGeometry(
 }
 
 import { ThreeEvent, useFrame } from "@react-three/fiber";
-import { getPaintContext, floodFillAt, paintLine, paintSquare } from "../lib/paint";
+import { getPaintContext, floodFillAt, paintLine, paintSquare, type PaintWindow } from "../lib/paint";
 
 const gridVertexShader = `
   varying vec2 vUv;
@@ -383,18 +350,12 @@ function PixelGridMaterial({ resolution, attach, cursorUV, brushSize, showCursor
   );
 }
 
-/** Push an arbitrary canvas bitmap into the live THREE texture so strokes appear instantly. */
-export function flushCanvasToLiveTexture(textureIndex: number, canvas: HTMLCanvasElement | null) {
-  const cached = textureCacheByIndex.get(textureIndex);
-  if (!cached || !canvas) return;
-  cached.tex.image = canvas;
-  cached.tex.needsUpdate = true;
-}
-
 /** Flush the offscreen paint canvas into the live THREE texture so strokes appear instantly. */
 function flushToLiveTexture(textureIndex: number) {
-  flushCanvasToLiveTexture(textureIndex, (window as any).__paintOffscreen as HTMLCanvasElement | undefined ?? null);
+  flushCanvasToLiveTexture(textureIndex, (window as PaintWindow).__paintOffscreen ?? null);
 }
+
+
 
 /**
  * Non-selected cube. Lives inside its bone's group, whose origin is the bone
@@ -609,32 +570,59 @@ function boneWorldMatrix(bones: Bone[], boneId: string | null): THREE.Matrix4 {
  * are model-space and are simply added as children (three composes the
  * hierarchy matrices). Child bones recurse.
  */
+const EMPTY_BONES: Bone[] = [];
+const EMPTY_CUBES: Cube[] = [];
+
+/** Lookups built once per cubes/bones change (O(n)) instead of filter()/find() per node. */
+interface SceneTree {
+  boneById: Map<string, Bone>;
+  bonesByParent: Map<string, Bone[]>;
+  cubesByBone: Map<string, Cube[]>;
+  rootBones: Bone[];
+  rootCubes: Cube[];
+}
+
+function buildSceneTree(cubes: Cube[], bones: Bone[]): SceneTree {
+  const boneById = new Map(bones.map((b) => [b.id, b]));
+  const bonesByParent = new Map<string, Bone[]>();
+  const cubesByBone = new Map<string, Cube[]>();
+  const rootBones: Bone[] = [];
+  const rootCubes: Cube[] = [];
+  for (const b of bones) {
+    if (b.parentId && boneById.has(b.parentId)) {
+      const l = bonesByParent.get(b.parentId);
+      if (l) l.push(b);
+      else bonesByParent.set(b.parentId, [b]);
+    } else rootBones.push(b); // orphaned parents fall back to root
+  }
+  for (const c of cubes) {
+    if (c.boneId && boneById.has(c.boneId)) {
+      const l = cubesByBone.get(c.boneId);
+      if (l) l.push(c);
+      else cubesByBone.set(c.boneId, [c]);
+    } else rootCubes.push(c);
+  }
+  return { boneById, bonesByParent, cubesByBone, rootBones, rootCubes };
+}
+
 function BoneNode({
   bone,
-  allCubes,
-  allBones,
+  tree,
   textures,
   resolution,
 }: {
   bone: Bone;
-  allCubes: Cube[];
-  allBones: Bone[];
+  tree: SceneTree;
   textures: ProjectTexture[];
   resolution: [number, number];
 }) {
   const select = useModel((s) => s.select);
   const showPivots = useApp((s) => s.showPivots);
-  const childBones = useMemo(
-    () => allBones.filter((b) => b.parentId === bone.id),
-    [allBones, bone.id]
-  );
-  const boneCubes = useMemo(
-    () => allCubes.filter((c) => c.boneId === bone.id),
-    [allCubes, bone.id]
-  );
+  const childBones = tree.bonesByParent.get(bone.id) ?? EMPTY_BONES;
+  const boneCubes = tree.cubesByBone.get(bone.id) ?? EMPTY_CUBES;
   // Bones use relative position to the parent's pivot (or absolute for roots)
   // and the full rotation from the file — the verified bbmodel semantics.
-  const parent = allBones.find((b) => b.id === bone.parentId);
+  const parent = bone.parentId ? tree.boneById.get(bone.parentId) : undefined;
   const relPos: Vec3 = parent
     ? [bone.origin[0] - parent.origin[0], bone.origin[1] - parent.origin[1], bone.origin[2] - parent.origin[2]]
     : bone.origin;
@@ -679,8 +667,7 @@ function BoneNode({
         <BoneNode
           key={child.id}
           bone={child}
-          allCubes={allCubes}
-          allBones={allBones}
+          tree={tree}
           textures={textures}
           resolution={resolution}
         />
@@ -956,11 +943,8 @@ function SceneContent({ textureMode }: { textureMode: boolean }) {
   const textures = useModel((s) => s.textures);
   const resolution = useModel((s) => s.resolution);
 
-  const rootCubes = useMemo(() => cubes.filter((c) => !c.boneId), [cubes]);
-  const rootBones = useMemo(
-    () => bones.filter((b) => !b.parentId || !bones.some((x) => x.id === b.parentId)),
-    [bones]
-  );
+  const tree = useMemo(() => buildSceneTree(cubes, bones), [cubes, bones]);
+  const { rootCubes, rootBones } = tree;
 
   return (
     <TextureModeContext.Provider value={textureMode}>
@@ -972,8 +956,7 @@ function SceneContent({ textureMode }: { textureMode: boolean }) {
           <BoneNode
             key={bone.id}
             bone={bone}
-            allCubes={cubes}
-            allBones={bones}
+            tree={tree}
             textures={textures}
             resolution={resolution}
           />
@@ -1052,7 +1035,7 @@ export function EditorScene({ mode }: { mode: "model" | "texture" }) {
         enableDamping 
         dampingFactor={0.15} 
         mouseButtons={{
-          LEFT: mode === "texture" ? 99 as any : THREE.MOUSE.ROTATE,
+          LEFT: (mode === "texture" ? 99 : THREE.MOUSE.ROTATE) as THREE.MOUSE,
           MIDDLE: THREE.MOUSE.PAN,
           RIGHT: THREE.MOUSE.ROTATE
         }}

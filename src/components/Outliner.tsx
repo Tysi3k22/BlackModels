@@ -41,16 +41,22 @@ function EyeButton({
   );
 }
 
+interface OutlinerTree {
+  bonesByParent: Map<string, Bone[]>;
+  cubesByBone: Map<string, Cube[]>;
+}
+
+const EMPTY_BONES: Bone[] = [];
+const EMPTY_CUBES: Cube[] = [];
+
 function BoneRow({
   bone,
-  allBones,
-  allCubes,
+  tree,
   depth,
   ancestorHidden = false,
 }: {
   bone: Bone;
-  allBones: Bone[];
-  allCubes: Cube[];
+  tree: OutlinerTree;
   depth: number;
   ancestorHidden?: boolean;
 }) {
@@ -59,9 +65,8 @@ function BoneRow({
   const select = useModel((s) => s.select);
   const toggleHidden = useModel((s) => s.toggleHidden);
 
-  const childBones = allBones.filter((b) => b.parentId === bone.id);
-  const boneCubes = allCubes.filter((c) => c.boneId === bone.id);
-  const hasChildren = childBones.length > 0 || boneCubes.length > 0;
+  const childBones = tree.bonesByParent.get(bone.id) ?? EMPTY_BONES;
+  const boneCubes = tree.cubesByBone.get(bone.id) ?? EMPTY_CUBES;
   const selected = selectedId === bone.id;
   const hiddenHere = !!bone.hidden || ancestorHidden;
 
@@ -82,15 +87,12 @@ function BoneRow({
             setOpen((o) => !o);
           }}
           className={`inline-block w-3 shrink-0 text-center text-[10px] text-neutral-500 ${
-            hasChildren ? "cursor-pointer hover:text-neutral-300" : "invisible"
+            childBones.length || boneCubes.length ? "cursor-pointer hover:text-neutral-300" : "invisible"
           }`}
         >
           {open ? "▾" : "▸"}
         </span>
-        <span
-          className="size-2.5 shrink-0 rotate-45 rounded-[2px] border"
-          style={{ borderColor: bone.color }}
-        />
+        <span className="size-2.5 shrink-0 rotate-45 rounded-[2px] border" style={{ borderColor: bone.color }} />
         <span className="truncate">{bone.name}</span>
         <EyeButton
           hidden={!!bone.hidden}
@@ -105,8 +107,7 @@ function BoneRow({
             <BoneRow
               key={child.id}
               bone={child}
-              allBones={allBones}
-              allCubes={allCubes}
+              tree={tree}
               depth={depth + 1}
               ancestorHidden={hiddenHere}
             />
@@ -142,10 +143,7 @@ function CubeRow({
       } ${hiddenHere ? "opacity-50" : ""}`}
       style={{ paddingLeft: `${8 + depth * 14 + 14}px` }}
     >
-      <span
-        className="size-2.5 shrink-0 rounded-sm"
-        style={{ backgroundColor: cube.color }}
-      />
+      <span className="size-2.5 shrink-0 rounded-sm" style={{ backgroundColor: cube.color }} />
       <span className="truncate">{cube.name}</span>
       <EyeButton
         hidden={!!cube.hidden}
@@ -165,19 +163,37 @@ export default function Outliner() {
   const setCubeParent = useModel((s) => s.setCubeParent);
   const setBoneParent = useModel((s) => s.setBoneParent);
   const showAll = useModel((s) => s.showAll);
-  const anyHidden =
-    cubes.some((c) => c.hidden) || bones.some((b) => b.hidden);
 
-  const rootCubes = cubes.filter((c) => !c.boneId);
-  const rootBones = bones.filter(
-    (b) => !b.parentId || !bones.some((x) => x.id === b.parentId)
-  );
-  const empty = cubes.length === 0 && bones.length === 0;
+  // One O(n) pass builds the lookups every row uses (no filter() per row).
+  const { tree, rootCubes, rootBones, boneById } = useMemo(() => {
+    const boneById = new Map(bones.map((b) => [b.id, b]));
+    const bonesByParent = new Map<string, Bone[]>();
+    const cubesByBone = new Map<string, Cube[]>();
+    const rootBones: Bone[] = [];
+    const rootCubes: Cube[] = [];
+    for (const b of bones) {
+      if (b.parentId && boneById.has(b.parentId)) {
+        const l = bonesByParent.get(b.parentId);
+        if (l) l.push(b);
+        else bonesByParent.set(b.parentId, [b]);
+      } else rootBones.push(b);
+    }
+    for (const c of cubes) {
+      if (c.boneId && boneById.has(c.boneId)) {
+        const l = cubesByBone.get(c.boneId);
+        if (l) l.push(c);
+        else cubesByBone.set(c.boneId, [c]);
+      } else rootCubes.push(c);
+    }
+    return { tree: { bonesByParent, cubesByBone }, rootCubes, rootBones, boneById };
+  }, [bones, cubes]);
+
+  const anyHidden = cubes.some((c) => c.hidden) || bones.some((b) => b.hidden);
 
   const selected = selectedCube ?? selectedBone;
   const selectedKind = selectedCube ? "cube" : selectedBone ? "bone" : null;
 
-  // Valid new parents for the selected bone: everything except itself and its subtree
+  // Valid new parents for the selected bone: everything except itself and its subtree.
   const boneParentOptions = useMemo(() => {
     if (!selectedBone) return [];
     const invalid = descendantBoneIds(bones, selectedBone.id);
@@ -185,7 +201,7 @@ export default function Outliner() {
   }, [selectedBone, bones]);
 
   const parentName = (id: string | null) =>
-    id ? (bones.find((b) => b.id === id)?.name ?? null) : null;
+    id ? (boneById.get(id)?.name ?? null) : null;
 
   return (
     <>
@@ -199,17 +215,16 @@ export default function Outliner() {
         </button>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-        {empty && (
+        {rootBones.length === 0 && rootCubes.length === 0 && (
           <p className="px-2 py-1 text-xs text-neutral-500">
-            Nothing here yet. Use “+ Add Cube” or “+ Add Bone”.
+            Nothing here yet. Use "Add Cube" or "Add Bone".
           </p>
         )}
         {rootBones.map((bone) => (
           <BoneRow
             key={bone.id}
             bone={bone}
-            allBones={bones}
-            allCubes={cubes}
+            tree={tree}
             depth={0}
           />
         ))}
@@ -221,9 +236,7 @@ export default function Outliner() {
       {selected && (
         <div className="border-t border-border p-2">
           <div className="mb-1 flex items-center gap-2 px-2">
-            <span className="text-xs font-medium text-neutral-300">
-              {selected.name}
-            </span>
+            <span className="text-xs font-medium text-neutral-300">{selected.name}</span>
             <span className="rounded bg-panel-2 px-1.5 text-[10px] uppercase tracking-wide text-neutral-500">
               {selectedKind}
             </span>
@@ -252,9 +265,7 @@ export default function Outliner() {
             {selectedKind === "cube" ? (
               <select
                 value={selectedCube!.boneId ?? ""}
-                onChange={(e) =>
-                  setCubeParent(selectedCube!.id, e.target.value || null)
-                }
+                onChange={(e) => setCubeParent(selectedCube!.id, e.target.value || null)}
                 className="min-w-0 flex-1 rounded border border-border bg-panel px-1 py-0.5 text-xs text-neutral-200"
               >
                 <option value="">model root</option>
@@ -267,9 +278,7 @@ export default function Outliner() {
             ) : (
               <select
                 value={selectedBone!.parentId ?? ""}
-                onChange={(e) =>
-                  setBoneParent(selectedBone!.id, e.target.value || null)
-                }
+                onChange={(e) => setBoneParent(selectedBone!.id, e.target.value || null)}
                 className="min-w-0 flex-1 rounded border border-border bg-panel px-1 py-0.5 text-xs text-neutral-200"
               >
                 <option value="">model root</option>

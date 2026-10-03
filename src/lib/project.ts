@@ -35,6 +35,8 @@ export interface ProjectFile {
   textures: ProjectTexture[];
   bones: Bone[];
   cubes: Cube[];
+  /** Optional metadata carried through import/export (bbmodel meta, project header, etc.). */
+  meta?: Record<string, unknown>;
 }
 
 /** Parsed model, ready for `importProject`. */
@@ -44,21 +46,26 @@ export interface ParsedModel {
   bones: Bone[];
   textures: ProjectTexture[];
   resolution: [number, number];
+  /** Optional metadata carried through import (bbmodel meta, project header, etc.). */
+  meta?: Record<string, unknown>;
 }
 
 export function serializeProject(): string {
-  const { name, cubes, bones, textures, resolution } = useModel.getState();
+  const state = useModel.getState();
   const project: ProjectFile = {
     version: PROJECT_VERSION,
     app: "blackmodels",
-    name,
-    resolution,
-    textures,
-    bones,
-    cubes,
+    name: state.name,
+    resolution: state.resolution,
+    textures: state.textures,
+    bones: state.bones,
+    cubes: state.cubes,
   };
   // Plain JSON: embedded base64 textures dominate the size, so pretty-printing
   // only inflates the file and slows the write down.
+  if (state.meta && Object.keys(state.meta).length > 0) {
+    project.meta = state.meta;
+  }
   return JSON.stringify(project);
 }
 
@@ -324,10 +331,10 @@ export function applyModelFile(
         elements?: unknown;
         cubes?: unknown;
       };
-      if (probe.meta && probe.elements) {
+      if (probe.meta && Array.isArray(probe.elements)) {
         data = parseBbmodel(contents);
         format = "bbmodel";
-      } else if (probe.cubes) {
+      } else if (Array.isArray(probe.cubes)) {
         data = parseProject(contents);
         format = "bmproj";
       } else {

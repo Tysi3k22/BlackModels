@@ -78,21 +78,46 @@ interface BbModel {
   textures?: BbTexture[];
 }
 
-const FACE_ORDER: FaceName[] = ["north", "east", "south", "west", "up", "down"];
-
-interface ParsedModel {
+/** Shape of a parsed .bbmodel that the store accepts. */
+export interface ParsedBbmodel {
   name: string;
   cubes: Cube[];
   bones: Bone[];
   textures: ProjectTexture[];
   resolution: [number, number];
+  meta?: Record<string, unknown>;
 }
+
+
+const FACE_ORDER: FaceName[] = ["north", "east", "south", "west", "up", "down"];
 
 /** bbmodel face texture index -> our stable texture id (null = dropped texture). */
 type TextureIdMap = Map<number, string | null>;
 
 const isVec3 = (v: unknown): v is Vec3 =>
   Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
+/**
+ * Best-effort extraction of the Blockbench format version + model format.
+ * Missing fields are treated as "unknown", not as an error.
+ */
+function readBbmodelMeta(meta: Record<string, unknown>): {
+  formatVersion: string | null;
+  modelFormat: string | null;
+  agent?: string | null;
+} {
+  const formatVersion: string | null =
+    typeof meta.format_version === "string"
+      ? meta.format_version
+      : typeof meta.format_version === "number"
+        ? String(meta.format_version)
+        : null;
+  const modelFormat: string | null =
+    typeof meta.model_format === "string" ? meta.model_format.toLowerCase() : null;
+  const agent: string | null =
+    typeof meta.agent === "string" && meta.agent.length > 0 ? meta.agent : null;
+  return { formatVersion, modelFormat, agent };
+}
 
 /**
  * bbmodel faces store a texture *index* into the texture list. Ours store a
@@ -155,11 +180,25 @@ function toCube(
   };
 }
 
-export function parseBbmodel(json: string): ParsedModel {
-  const data = JSON.parse(json) as BbModel;
-  if (!data || !Array.isArray(data.elements)) {
+export function parseBbmodel(json: string): ParsedBbmodel {
+  const raw = JSON.parse(json) as BbModel | unknown;
+  if (!raw || typeof raw !== "object") {
     throw new Error("Not a valid .bbmodel file");
   }
+  const data = raw as BbModel;
+  if (!Array.isArray(data.elements)) {
+    throw new Error("Not a valid .bbmodel file");
+  }
+
+  const rawMeta = data.meta && typeof data.meta === "object" ? data.meta : {};
+  const { formatVersion, modelFormat, agent } = readBbmodelMeta(rawMeta as Record<string, unknown>);
+
+  // Diagnostics-only: we do not reject files just because the version/format is
+  // undocumented. Older Blockbench exports sometimes omit `format_version`.
+  const meta = Object.assign(
+    { agent: agent ?? undefined, modelFormat: modelFormat ?? undefined },
+    formatVersion != null ? { formatVersion } : {}
+  ) as Record<string, unknown>;
 
   const resolution: [number, number] = data.resolution
     ? [data.resolution.width, data.resolution.height]
@@ -243,6 +282,7 @@ export function parseBbmodel(json: string): ParsedModel {
     bones,
     textures,
     resolution,
+    meta,
   };
 }
 
@@ -354,12 +394,13 @@ export function serializeBbmodel(
     ...rootBones.map(buildGroup),
   ];
 
+  const meta: Record<string, unknown> = {
+    format_version: "4.0",
+    model_format: "free",
+    box_uv: false,
+  };
   const model: BbModel = {
-    meta: {
-      format_version: "4.0",
-      model_format: "free",
-      box_uv: false,
-    },
+    meta,
     name,
     visible_box: undefined,
     variable_placeholders: "",

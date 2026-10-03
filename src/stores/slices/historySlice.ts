@@ -23,7 +23,7 @@ export interface HistorySliceActions {
   /** Mark the model as edited (used when restoring an autosave). */
   markDirty: () => void;
   /** Replace the whole model (project load / new project). */
-  importProject: (data: ProjectImport) => void;
+  importProject: (data: ProjectImport & { meta?: Record<string, unknown> }) => void;
 }
 
 export const createHistorySlice: StateCreator<ModelState, [], [], HistorySliceActions> = (set, get) => ({
@@ -106,6 +106,7 @@ export const createHistorySlice: StateCreator<ModelState, [], [], HistorySliceAc
       textures,
       activeTexture: textures[0]?.id ?? null,
       resolution: data.resolution ?? [256, 256],
+      meta: data.meta,
       selectedId: null,
       selectedKind: null,
     });

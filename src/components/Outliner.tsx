@@ -2,12 +2,12 @@ import { useMemo, useState } from "react";
 import {
   Bone,
   Cube,
-  descendantBoneIds,
   selectSelectedBone,
   selectSelectedCube,
   useModel,
 } from "../stores/modelStore";
 import { PanelTitle } from "./Panel";
+import SelectedDetailsPanel from "./SelectedDetailsPanel";
 
 function EyeButton({
   hidden,
@@ -49,16 +49,24 @@ interface OutlinerTree {
 const EMPTY_BONES: Bone[] = [];
 const EMPTY_CUBES: Cube[] = [];
 
+interface DropTargetCallbacks {
+  onDropCube?: (cubeId: string) => void;
+  draggingOverBoneId?: string | null;
+  setDraggingOverBoneId?: (id: string | null) => void;
+}
+
 function BoneRow({
   bone,
   tree,
   depth,
   ancestorHidden = false,
+  drop,
 }: {
   bone: Bone;
   tree: OutlinerTree;
   depth: number;
   ancestorHidden?: boolean;
+  drop?: DropTargetCallbacks;
 }) {
   const [open, setOpen] = useState(true);
   const selectedId = useModel((s) => s.selectedId);
@@ -70,12 +78,35 @@ function BoneRow({
   const selected = selectedId === bone.id;
   const hiddenHere = !!bone.hidden || ancestorHidden;
 
+  const isHovered = drop?.draggingOverBoneId === bone.id;
+
   return (
     <>
       <button
         onClick={() => select(bone.id, "bone")}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          if (drop?.setDraggingOverBoneId) drop.setDraggingOverBoneId(bone.id);
+        }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+        }}
+        onDragLeave={() => {
+          if (drop?.setDraggingOverBoneId && drop.draggingOverBoneId === bone.id) drop.setDraggingOverBoneId(null);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          if (drop?.setDraggingOverBoneId) drop.setDraggingOverBoneId(null);
+          const cubeId = e.dataTransfer.getData("model/cube");
+          if (cubeId && drop?.onDropCube) drop.onDropCube(cubeId);
+        }}
         className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm transition-colors ${
-          selected ? "bg-accent/20 text-accent" : "text-neutral-300 hover:bg-panel-2"
+          selected
+            ? "bg-accent/20 text-accent"
+            : isHovered
+              ? "bg-panel-2 text-white"
+              : "text-neutral-300 hover:bg-panel-2"
         } ${hiddenHere ? "opacity-50" : ""}`}
         style={{ paddingLeft: `${8 + depth * 14}px` }}
       >
@@ -110,10 +141,11 @@ function BoneRow({
               tree={tree}
               depth={depth + 1}
               ancestorHidden={hiddenHere}
+              drop={drop}
             />
           ))}
           {boneCubes.map((cube) => (
-            <CubeRow key={cube.id} cube={cube} depth={depth + 1} ancestorHidden={hiddenHere} />
+            <CubeRow key={cube.id} cube={cube} depth={depth + 1} ancestorHidden={hiddenHere} draggable />
           ))}
         </>
       )}
@@ -124,10 +156,12 @@ function BoneRow({
 function CubeRow({
   cube,
   depth,
+  draggable = false,
   ancestorHidden = false,
 }: {
   cube: Cube;
   depth: number;
+  draggable?: boolean;
   ancestorHidden?: boolean;
 }) {
   const selectedId = useModel((s) => s.selectedId);
@@ -138,6 +172,12 @@ function CubeRow({
   return (
     <button
       onClick={() => select(cube.id, "cube")}
+      draggable={draggable}        onDragStart={(e) => {
+        if (!draggable) return;
+        try { e.dataTransfer.setData("model/cube", cube.id); } catch {} 
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setDragImage(new Image(), 0, 0);
+      }}
       className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm transition-colors ${
         selected ? "bg-accent/20 text-accent" : "text-neutral-300 hover:bg-panel-2"
       } ${hiddenHere ? "opacity-50" : ""}`}
@@ -157,15 +197,11 @@ function CubeRow({
 export default function Outliner() {
   const cubes = useModel((s) => s.cubes);
   const bones = useModel((s) => s.bones);
-  const selectedCube = useModel(selectSelectedCube);
-  const selectedBone = useModel(selectSelectedBone);
-  const deleteSelected = useModel((s) => s.deleteSelected);
   const setCubeParent = useModel((s) => s.setCubeParent);
-  const setBoneParent = useModel((s) => s.setBoneParent);
   const showAll = useModel((s) => s.showAll);
 
   // One O(n) pass builds the lookups every row uses (no filter() per row).
-  const { tree, rootCubes, rootBones, boneById } = useMemo(() => {
+  const { tree, rootCubes, rootBones } = useMemo(() => {
     const boneById = new Map(bones.map((b) => [b.id, b]));
     const bonesByParent = new Map<string, Bone[]>();
     const cubesByBone = new Map<string, Cube[]>();
@@ -185,23 +221,21 @@ export default function Outliner() {
         else cubesByBone.set(c.boneId, [c]);
       } else rootCubes.push(c);
     }
-    return { tree: { bonesByParent, cubesByBone }, rootCubes, rootBones, boneById };
+    return { tree: { bonesByParent, cubesByBone }, rootCubes, rootBones };
   }, [bones, cubes]);
 
   const anyHidden = cubes.some((c) => c.hidden) || bones.some((b) => b.hidden);
-
+  const selectedCube = useModel(selectSelectedCube);
+  const selectedBone = useModel(selectSelectedBone);
   const selected = selectedCube ?? selectedBone;
-  const selectedKind = selectedCube ? "cube" : selectedBone ? "bone" : null;
 
-  // Valid new parents for the selected bone: everything except itself and its subtree.
-  const boneParentOptions = useMemo(() => {
-    if (!selectedBone) return [];
-    const invalid = descendantBoneIds(bones, selectedBone.id);
-    return bones.filter((b) => !invalid.has(b.id));
-  }, [selectedBone, bones]);
+  const [draggingOverBoneId, setDraggingOverBoneId] = useState<string | null>(null);
 
-  const parentName = (id: string | null) =>
-    id ? (boneById.get(id)?.name ?? null) : null;
+  const drop: DropTargetCallbacks = {
+    onDropCube: (cubeId) => setCubeParent(cubeId, null),
+    draggingOverBoneId,
+    setDraggingOverBoneId,
+  };
 
   return (
     <>
@@ -226,79 +260,27 @@ export default function Outliner() {
             bone={bone}
             tree={tree}
             depth={0}
+            drop={{
+              ...drop,
+              onDropCube: (cubeId) => setCubeParent(cubeId, bone.id),
+            }}
           />
         ))}
         {rootCubes.map((cube) => (
-          <CubeRow key={cube.id} cube={cube} depth={0} />
+          <CubeRow key={cube.id} cube={cube} depth={0} draggable />
         ))}
+        {!selected && (
+          <p className="px-2 py-1 text-xs text-neutral-500">
+            Select a cube or bone to see its details.
+          </p>
+        )}
       </div>
 
       {selected && (
-        <div className="border-t border-border p-2">
-          <div className="mb-1 flex items-center gap-2 px-2">
-            <span className="text-xs font-medium text-neutral-300">{selected.name}</span>
-            <span className="rounded bg-panel-2 px-1.5 text-[10px] uppercase tracking-wide text-neutral-500">
-              {selectedKind}
-            </span>
-          </div>
-
-          {selectedCube && (
-            <div className="px-2 text-[11px] leading-5 text-neutral-500">
-              from {selectedCube.from.map((v) => +v.toFixed(2)).join(", ")}
-              <br />
-              to&nbsp;&nbsp;{selectedCube.to.map((v) => +v.toFixed(2)).join(", ")}
-              <br />
-              parent: {parentName(selectedCube.boneId) ?? "model root"}
-            </div>
-          )}
-          {selectedBone && (
-            <div className="px-2 text-[11px] leading-5 text-neutral-500">
-              origin {selectedBone.origin.map((v) => +v.toFixed(2)).join(", ")}
-              <br />
-              rotation {selectedBone.rotation.map((v) => +v.toFixed(2)).join(", ")}
-            </div>
-          )}
-
-          {/* Parent selector */}
-          <label className="mt-2 flex items-center gap-2 px-2 text-[11px] text-neutral-500">
-            Parent
-            {selectedKind === "cube" ? (
-              <select
-                value={selectedCube!.boneId ?? ""}
-                onChange={(e) => setCubeParent(selectedCube!.id, e.target.value || null)}
-                className="min-w-0 flex-1 rounded border border-border bg-panel px-1 py-0.5 text-xs text-neutral-200"
-              >
-                <option value="">model root</option>
-                {bones.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <select
-                value={selectedBone!.parentId ?? ""}
-                onChange={(e) => setBoneParent(selectedBone!.id, e.target.value || null)}
-                className="min-w-0 flex-1 rounded border border-border bg-panel px-1 py-0.5 text-xs text-neutral-200"
-              >
-                <option value="">model root</option>
-                {boneParentOptions.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
-            )}
-          </label>
-
-          <button
-            onClick={deleteSelected}
-            className="mt-2 w-full rounded px-2 py-1.5 text-left text-sm text-red-400 transition-colors hover:bg-red-500/10"
-          >
-            Delete
-          </button>
-        </div>
+        <SelectedDetailsPanel />
       )}
     </>
   );
 }
+
+

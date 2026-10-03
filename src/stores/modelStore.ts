@@ -23,8 +23,12 @@ export interface ModelData {
   future: HistoryEntry[];
   /** True when there are unsaved edits (cleared by markSaved / importProject). */
   dirty: boolean;
-  /** Live Minecraft-specific validation results for the current model. */
+  /** Live validation results for the current model (import sanity, format, atlas). */
   issues: ValidationIssue[];
+  /** Metadata carried through import/export (format version, bbmodel model_format, etc.). */
+  meta?: Record<string, unknown>;
+  /** Last field-level transform errors, shown in the selected-details panel. */
+  transformErrors: string[] | null;
 }
 
 export interface ModelState extends ModelData, ModelSliceActions, TextureSliceActions, HistorySliceActions {}
@@ -42,6 +46,8 @@ export const useModel = create<ModelState>()((...a) => ({
   future: [],
   dirty: false,
   issues: [],
+  meta: undefined,
+  transformErrors: null,
   ...createModelSlice(...a),
   ...createTextureSlice(...a),
   ...createHistorySlice(...a),
@@ -61,6 +67,14 @@ useModel.subscribe((state) => {
     issues.some((issue, i) => issue.severity !== prev[i]?.severity || issue.message !== prev[i]?.message)
   ) {
     useModel.setState({ issues });
+  }
+});
+
+// Live transform-error banner: clear when errors disappear.
+useModel.subscribe((state) => {
+  const prev = useModel.getState().transformErrors;
+  if (prev && !state.transformErrors) {
+    useModel.setState({ transformErrors: null });
   }
 });
 

@@ -26,7 +26,7 @@ export default function ModelEditor() {
 
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Delete" || e.key === "Backspace") {
+            if (e.key === "Delete") {
                 e.preventDefault();
                 deleteSelected();
             }

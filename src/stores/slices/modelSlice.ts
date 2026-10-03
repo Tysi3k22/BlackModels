@@ -25,8 +25,11 @@ export interface ModelSliceActions {
   setCubeShade: (cubeId: string, shade: boolean) => void;
   setTransform: (t: TransformUpdate) => void;
   setBoneTransform: (t: BoneTransformUpdate) => void;
+  commitTransform: (t: TransformUpdate, errors: string[]) => void;
+  commitBoneTransform: (t: BoneTransformUpdate, errors: string[]) => void;
   setCubeParent: (cubeId: string, boneId: string | null) => void;
   setBoneParent: (boneId: string, parentId: string | null) => void;
+  renameSelected: (name: string) => void;
   /** Show/hide one cube or bone (a hidden bone hides its whole subtree). */
   toggleHidden: (id: string, kind: SelectedKind) => void;
   /** Make every cube and bone visible again. */
@@ -118,6 +121,27 @@ export const createModelSlice: StateCreator<ModelState, [], [], ModelSliceAction
       };
     }),
 
+  renameSelected: (name: string) =>
+    set((state) => {
+      if (!state.selectedId) return {};
+      const isCube = state.selectedKind === "cube";
+      const current =
+        isCube
+          ? state.cubes.find((c) => c.id === state.selectedId)
+          : state.bones.find((b) => b.id === state.selectedId);
+      if (!current || current.name === name) return {};
+      const update =
+        isCube
+          ? { cubes: state.cubes.map((c) => (c.id === state.selectedId ? { ...c, name } : c)) }
+          : { bones: state.bones.map((b) => (b.id === state.selectedId ? { ...b, name } : b)) };
+      return {
+        past: pushHistory(state.past, snapshot(state)),
+        future: [],
+        dirty: true,
+        ...update,
+      };
+    }),
+
   select: (selectedId, selectedKind) =>
     set((state) => {
       const kind: SelectedKind | null = selectedId ? (selectedKind ?? "cube") : null;
@@ -171,6 +195,30 @@ export const createModelSlice: StateCreator<ModelState, [], [], ModelSliceAction
       };
     }),
 
+  commitTransform: (t: TransformUpdate, errors: string[]) =>
+    set((state) => {
+      const cube =
+        state.selectedKind === "cube"
+          ? state.cubes.find((c) => c.id === state.selectedId)
+          : null;
+      if (!cube) return {};
+      const next: Cube = {
+        ...cube,
+        from: t.from,
+        to: t.to,
+        origin: t.origin ?? cube.origin,
+        rotation: t.rotation ?? cube.rotation,
+      };
+      if (sameTransform.cube(next, cube) && errors.length === 0) return {};
+      return {
+        past: pushHistory(state.past, snapshot(state)),
+        future: [],
+        dirty: true,
+        cubes: state.cubes.map((c) => (c.id === cube.id ? next : c)),
+        transformErrors: errors,
+      };
+    }),
+
   setBoneTransform: (t) =>
     set((state) => {
       const bone =
@@ -182,6 +230,24 @@ export const createModelSlice: StateCreator<ModelState, [], [], ModelSliceAction
       return {
         dirty: true,
         bones: state.bones.map((b) => (b.id === bone.id ? { ...b, ...t } : b)),
+      };
+    }),
+
+  commitBoneTransform: (t: BoneTransformUpdate, errors: string[]) =>
+    set((state) => {
+      const bone =
+        state.selectedKind === "bone"
+          ? state.bones.find((b) => b.id === state.selectedId)
+          : null;
+      if (!bone) return {};
+      const next: Bone = { ...bone, ...t };
+      if (sameTransform.bone(bone, t) && errors.length === 0) return {};
+      return {
+        past: pushHistory(state.past, snapshot(state)),
+        future: [],
+        dirty: true,
+        bones: state.bones.map((b) => (b.id === bone.id ? next : b)),
+        transformErrors: errors,
       };
     }),
 

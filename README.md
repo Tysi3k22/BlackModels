@@ -146,14 +146,14 @@ Resource Pack / Plugin
 * [x] Textures
 * [x] UV mapping
 * [x] Materials
-* [ ] Minecraft-specific constraints
+* [x] Minecraft-specific constraints (import-time sanity checks, `.bbmodel` version compat)
 
 ## Phase 3 — Blockbench Compatibility
 
 * [x] `.bbmodel` importer
 * [x] `.bbmodel` exporter
-* [ ] Model validation
-* [ ] Version compatibility
+* [x] Model validation
+* [x] Version compatibility
 
 ## Phase 4 — Animation
 

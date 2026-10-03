@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import type { Bone, Cube, ProjectTexture, SelectedKind } from "./modelTypes";
 import type { HistoryEntry } from "./modelHistory";
+import { validateModel } from "../lib/validate";
+import type { ValidationIssue } from "../lib/validate";
 import { createHistorySlice, type HistorySliceActions } from "./slices/historySlice";
 import { createModelSlice, type ModelSliceActions } from "./slices/modelSlice";
 import { createTextureSlice, type TextureSliceActions } from "./slices/textureSlice";
@@ -21,6 +23,8 @@ export interface ModelData {
   future: HistoryEntry[];
   /** True when there are unsaved edits (cleared by markSaved / importProject). */
   dirty: boolean;
+  /** Live Minecraft-specific validation results for the current model. */
+  issues: ValidationIssue[];
 }
 
 export interface ModelState extends ModelData, ModelSliceActions, TextureSliceActions, HistorySliceActions {}
@@ -37,6 +41,7 @@ export const useModel = create<ModelState>()((...a) => ({
   past: [],
   future: [],
   dirty: false,
+  issues: [],
   ...createModelSlice(...a),
   ...createTextureSlice(...a),
   ...createHistorySlice(...a),
@@ -46,6 +51,18 @@ export const useModel = create<ModelState>()((...a) => ({
 if (import.meta.env.DEV && typeof window !== "undefined") {
   (window as unknown as { __model?: typeof useModel }).__model = useModel;
 }
+
+// Live Minecraft constraint validation: recompute whenever model content changes.
+useModel.subscribe((state) => {
+  const issues = validateModel(state.cubes, state.bones, state.textures, state.resolution);
+  const prev = useModel.getState().issues;
+  if (
+    issues.length !== prev.length ||
+    issues.some((issue, i) => issue.severity !== prev[i]?.severity || issue.message !== prev[i]?.message)
+  ) {
+    useModel.setState({ issues });
+  }
+});
 
 // Backwards-compatible surface: everyone imports model types/helpers from here.
 export * from "./modelTypes";

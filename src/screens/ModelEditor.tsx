@@ -3,7 +3,7 @@ import {Divider, PanelTitle, ToolButton} from "../components/Panel";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { ModelTools, useApp } from "../constants";
 import Viewport from "../components/Viewport";
-import Outliner from "../components/Outliner";
+import OutlinerPanel from "../components/OutlinerPanel";
 import { useModel } from "../stores/modelStore";
 
 const tools: ModelTools[] = ["Select", "Move", "Rotate", "Scale"];
@@ -97,7 +97,7 @@ export default function ModelEditor() {
             </div>
 
             <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col border-l border-border">
-                <Outliner />
+                <OutlinerPanel />
             </div>
         </main>
     )

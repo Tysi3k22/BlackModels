@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../constants";
-import { applyModelFile } from "../lib/project";
+import { applyModelFile, confirmDiscardChanges, newProject, parseProject } from "../lib/project";
 import { listRecent, removeRecent, RecentProject } from "../lib/recent";
+import { AutosaveRecord, clearAutosave, readAutosave } from "../lib/autosave";
+import { useModel } from "../stores/modelStore";
 
 type MenuTab = "recent" | "library";
 
@@ -35,21 +37,60 @@ export default function MainMenu() {
     const setScreen = useApp((state) => state.setScreen);
     const [menuTab, setMenuTab] = useState<MenuTab>("recent");
     const [recent, setRecent] = useState<RecentProject[]>(() => listRecent());
+    const [autosave, setAutosave] = useState<AutosaveRecord | null>(null);
+
+    useEffect(() => {
+        let alive = true;
+        void readAutosave().then((record) => {
+            if (alive) setAutosave(record);
+        });
+        return () => {
+            alive = false;
+        };
+    }, []);
 
     const refreshRecent = () => setRecent(listRecent());
+
+    const restoreAutosave = () => {
+        if (!autosave) return;
+        if (!confirmDiscardChanges()) return;
+        try {
+            useModel.getState().importProject(parseProject(autosave.data));
+            // The restored session is still unsaved work.
+            useModel.getState().markDirty();
+            setScreen("editor");
+        } catch (e) {
+            console.error("Failed to restore autosave", e);
+            void clearAutosave();
+            setAutosave(null);
+        }
+    };
+
+    const discardAutosave = () => {
+        void clearAutosave();
+        setAutosave(null);
+    };
 
     const openLibraryModel = async (entry: LibraryEntry) => {
         const res = await fetch(entry.url);
         const json = await res.text();
+        if (!confirmDiscardChanges()) return;
         if (applyModelFile(json, `${entry.id}.bbmodel`) === "ok") {
             setScreen("editor");
         }
     };
 
     const openRecent = (entry: RecentProject) => {
+        if (!confirmDiscardChanges()) return;
         if (applyModelFile(entry.data) === "ok") {
             setScreen("editor");
         }
+    };
+
+    const startNewModel = () => {
+        if (!confirmDiscardChanges()) return;
+        newProject();
+        setScreen("editor");
     };
 
     const deleteRecent = (id: string) => {
@@ -112,8 +153,31 @@ export default function MainMenu() {
           </p>
         </header>
 
+        {autosave && (
+          <div className="flex w-[28rem] max-w-[90vw] items-center gap-3 rounded-lg border border-accent/40 bg-accent/10 px-4 py-2.5 text-left">
+            <div className="flex-1">
+              <div className="text-sm text-neutral-200">Unsaved session found</div>
+              <div className="text-xs text-neutral-500">
+                {autosave.name} · {timeAgo(autosave.savedAt)}
+              </div>
+            </div>
+            <button
+              onClick={restoreAutosave}
+              className="rounded bg-accent px-2.5 py-1 text-xs font-medium text-black transition-[filter] hover:brightness-110"
+            >
+              Restore
+            </button>
+            <button
+              onClick={discardAutosave}
+              className="rounded px-2 py-1 text-xs text-neutral-400 transition-colors hover:bg-panel-2 hover:text-neutral-100"
+            >
+              Discard
+            </button>
+          </div>
+        )}
+
         <button
-          onClick={() => setScreen("editor")}
+          onClick={startNewModel}
           className="w-[28rem] max-w-[90vw] cursor-pointer rounded-lg bg-accent py-3 text-center font-medium text-black transition-[filter] hover:brightness-110"
         >
           + New Model

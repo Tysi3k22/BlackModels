@@ -17,6 +17,7 @@ import {
 import { flipUV } from "../lib/uv";
 import { openImageFile } from "../lib/files";
 import { EditorScene } from "../components/Viewport";
+import ErrorBoundary from "../components/ErrorBoundary";
 
 const tools: TextureTools[] = ["Brush", "Pencil", "Eraser", "Fill", "Picker", "UV"];
 
@@ -131,6 +132,7 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
   const brushSize = useApp((s) => s.textureBrushSize);
   const setBrushSize = useApp((s) => s.setTextureBrushSize);
   const commitTexturePixels = useModel((s) => s.commitTexturePixels);
+  const endTransform = useModel((s) => s.endTransform);
   const overlay = useModel(selectFaceOverlay);
   const resolution = useModel((s) => s.resolution);
   const uvFace = useApp((s) => s.uvFace);
@@ -359,6 +361,8 @@ function PaintCanvas({ tex }: { tex: ProjectTexture }) {
   const onUp = () => {
     if (uvDrag.current) {
       uvDrag.current = null;
+      // The drag may have ended where it started: drop the empty undo step.
+      endTransform();
       return;
     }
     if (stroke.current) {
@@ -530,8 +534,7 @@ const RENDER_SIDES: { id: RenderSides; label: string; hint: string }[] = [
 
 /** Material of the active texture + lighting toggle of the selected cube. */
 function MaterialPanel() {
-  const activeTexture = useModel((s) => s.activeTexture);
-  const tex = useModel((s) => (s.activeTexture != null ? s.textures[s.activeTexture] ?? null : null));
+  const tex = useModel((s) => s.textures.find((t) => t.id === s.activeTexture) ?? null);
   const cube = useModel(selectSelectedCube);
   const setTextureMaterial = useModel((s) => s.setTextureMaterial);
   const setCubeShade = useModel((s) => s.setCubeShade);
@@ -545,7 +548,7 @@ function MaterialPanel() {
   return (
     <div className="shrink-0 border-t border-border p-2">
       <div className="mb-1.5 text-[11px] font-semibold tracking-widest text-neutral-500">MATERIAL</div>
-      {tex && activeTexture != null ? (
+      {tex ? (
         <>
           <div className="mb-1 text-[10px] text-neutral-500">Render mode</div>
           <div className="mb-2 grid grid-cols-2 gap-1">
@@ -553,7 +556,7 @@ function MaterialPanel() {
               <button
                 key={m.id}
                 title={m.hint}
-                onClick={() => setTextureMaterial(activeTexture, { renderMode: m.id })}
+                onClick={() => setTextureMaterial(tex.id, { renderMode: m.id })}
                 className={seg(mat.renderMode === m.id)}
               >
                 {m.label}
@@ -566,7 +569,7 @@ function MaterialPanel() {
               <button
                 key={m.id}
                 title={m.hint}
-                onClick={() => setTextureMaterial(activeTexture, { sides: m.id })}
+                onClick={() => setTextureMaterial(tex.id, { sides: m.id })}
                 className={seg(mat.sides === m.id)}
               >
                 {m.label}
@@ -722,7 +725,7 @@ export default function TextureEditor() {
     const removeTexture = useModel((s) => s.removeTexture);
     const createTexture = useModel((s) => s.createTexture);
 
-    const tex = activeTexture != null ? (textures[activeTexture] ?? null) : null;
+    const tex = useModel((s) => s.textures.find((t) => t.id === s.activeTexture) ?? null);
 
     const importImage = async () => {
         const file = await openImageFile();
@@ -774,7 +777,9 @@ export default function TextureEditor() {
                     3D PREVIEW
                 </div>
                 <div className="relative min-h-0 flex-1">
-                    <EditorScene mode="texture" />
+                    <ErrorBoundary label="The 3D preview">
+                        <EditorScene mode="texture" />
+                    </ErrorBoundary>
                 </div>
             </section>
 
@@ -801,12 +806,12 @@ export default function TextureEditor() {
                     {textures.length === 0 && (
                         <p className="px-2 py-1 text-xs text-neutral-500">Nothing here yet.</p>
                     )}
-                    {textures.map((t, i) => (
+                    {textures.map((t) => (
                         <div
-                            key={`${t.name}-${i}`}
-                            onClick={() => setActiveTexture(i)}
+                            key={t.id}
+                            onClick={() => setActiveTexture(t.id)}
                             className={`mb-0.5 flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm transition-colors ${
-                                activeTexture === i
+                                activeTexture === t.id
                                     ? "bg-accent/20 text-accent"
                                     : "text-neutral-300 hover:bg-panel-2"
                             }`}
@@ -824,7 +829,7 @@ export default function TextureEditor() {
                                 title="Remove texture"
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    removeTexture(i);
+                                    removeTexture(t.id);
                                 }}
                                 className="ml-auto shrink-0 rounded px-1 text-xs text-neutral-500 hover:bg-red-500/10 hover:text-red-400"
                             >

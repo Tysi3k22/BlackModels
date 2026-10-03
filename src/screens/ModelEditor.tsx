@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import {Divider, PanelTitle, ToolButton} from "../components/Panel";
+import ErrorBoundary from "../components/ErrorBoundary";
 import { ModelTools, useApp } from "../constants";
 import Viewport from "../components/Viewport";
 import Outliner from "../components/Outliner";
@@ -90,7 +91,9 @@ export default function ModelEditor() {
 
 
             <div id="middleContainer" className="relative flex min-h-0 w-full flex-col">
-                <Viewport />
+                <ErrorBoundary label="The 3D view">
+                    <Viewport />
+                </ErrorBoundary>
             </div>
 
             <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col border-l border-border">

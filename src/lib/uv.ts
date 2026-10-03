@@ -44,10 +44,10 @@ export function boxUnwrap(size: Vec3, u: number, v: number): Record<FaceName, UV
   };
 }
 
-/** Wrap UV rects into CubeFaces bound to `texture` (null = untextured). */
+/** Wrap UV rects into CubeFaces bound to a texture id (null = untextured). */
 export function toCubeFaces(
   rects: Record<FaceName, UVRect>,
-  texture: number | null
+  texture: string | null
 ): Required<CubeFaces> {
   const out = {} as Required<CubeFaces>;
   for (const face of Object.keys(rects) as FaceName[]) {
@@ -139,7 +139,7 @@ export interface PackResult {
 export function packCubes(
   cubes: Cube[],
   resolution: [number, number],
-  texture: number | null
+  texture: string | null
 ): PackResult {
   const grid = new AtlasGrid(resolution[0], resolution[1]);
   const items = cubes

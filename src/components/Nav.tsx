@@ -13,6 +13,7 @@ export default function NavBar() {
     const redo = useModel((s) => s.redo);
     const hasCubes = useModel((s) => s.cubes.length > 0);
     const modelName = useModel((s) => s.name);
+    const dirty = useModel((s) => s.dirty);
     const cls = (t: string) =>
       `h-full border-b-2 px-4 text-sm transition-colors ${
         tab === t
@@ -71,8 +72,14 @@ export default function NavBar() {
           >
             ↷
           </button>
-          {modelName && modelName !== "Untitled" && (
-            <span className="ml-3 text-xs text-neutral-500">{modelName}</span>
+          {(dirty || (modelName && modelName !== "Untitled")) && (
+            <span
+              className="ml-3 text-xs text-neutral-500"
+              title={dirty ? "Unsaved changes" : undefined}
+            >
+              {modelName}
+              {dirty ? " •" : ""}
+            </span>
           )}
         </div>
         <div className="ml-auto flex h-full items-center pr-2 text-sm">

@@ -20,42 +20,55 @@ export function paintLine(ctx: CanvasRenderingContext2D, from: [number, number],
     }
 }
 
-function rgbaOf(hex: string): [number, number, number, number] {
-    const v = hex.replace("#", "");
-    return [
-        parseInt(v.slice(0, 2), 16),
-        parseInt(v.slice(2, 4), 16),
-        parseInt(v.slice(4, 6), 16),
-        255,
-    ];
+/** Parse #rgb / #rgba / #rrggbb / #rrggbbaa into RGBA bytes. */
+export function rgbaOf(hex: string): [number, number, number, number] {
+    let v = hex.trim().replace(/^#/, "");
+    if (v.length === 3 || v.length === 4) v = v.split("").map((c) => c + c).join("");
+    if (v.length === 6) v += "ff";
+    if (v.length !== 8 || /[^0-9a-f]/i.test(v)) return [0, 0, 0, 255];
+    const n = parseInt(v, 16);
+    return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
 }
 
 export function floodFillAt(ctx: CanvasRenderingContext2D, x: number, y: number, hex: string, resW: number, resH: number) {
+    if (x < 0 || y < 0 || x >= resW || y >= resH) return;
     const img = ctx.getImageData(0, 0, resW, resH);
     const d = img.data;
     const start = (y * resW + x) * 4;
-    const target = [d[start], d[start + 1], d[start + 2], d[start + 3]];
+    const tr = d[start], tg = d[start + 1], tb = d[start + 2], ta = d[start + 3];
     const [nr, ng, nb, na] = rgbaOf(hex);
-    if (target[0] === nr && target[1] === ng && target[2] === nb && target[3] === na) return;
+    if (tr === nr && tg === ng && tb === nb && ta === na) return;
+    // Flat arrays instead of [x, y] tuples: a 1024x1024 fill would otherwise
+    // allocate millions of tiny objects. Each pixel is pushed at most once.
     const seen = new Uint8Array(resW * resH);
-    const stack: [number, number][] = [[x, y]];
-    while (stack.length) {
-        const [cx, cy] = stack.pop()!;
-        if (cx < 0 || cy < 0 || cx >= resW || cy >= resH) continue;
-        const idx = cy * resW + cx;
-        if (seen[idx]) continue;
-        seen[idx] = 1;
+    const stack = new Int32Array(resW * resH);
+    let top = 0;
+    const push = (idx: number) => {
+        if (!seen[idx]) {
+            seen[idx] = 1;
+            stack[top++] = idx;
+        }
+    };
+    const startIdx = y * resW + x;
+    push(startIdx);
+    while (top > 0) {
+        const idx = stack[--top];
         const o = idx * 4;
         if (
-            d[o] !== target[0] || d[o + 1] !== target[1] ||
-            d[o + 2] !== target[2] || d[o + 3] !== target[3]
+            d[o] !== tr || d[o + 1] !== tg ||
+            d[o + 2] !== tb || d[o + 3] !== ta
         )
             continue;
         d[o] = nr;
         d[o + 1] = ng;
         d[o + 2] = nb;
         d[o + 3] = na;
-        stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+        const py = (idx / resW) | 0;
+        const px = idx - py * resW;
+        if (px > 0) push(idx - 1);
+        if (px + 1 < resW) push(idx + 1);
+        if (py > 0) push(idx - resW);
+        if (py + 1 < resH) push(idx + resW);
     }
     ctx.putImageData(img, 0, 0);
 }

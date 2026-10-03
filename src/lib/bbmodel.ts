@@ -1,5 +1,6 @@
 import { saveTextFile } from "./files";
 import { pushRecent } from "./recent";
+import { clampUV, type UVRect } from "./uv";
 import {
   BB_MARKER_COLORS,
   Bone,
@@ -10,6 +11,7 @@ import {
   RenderMode,
   RenderSides,
   Vec3,
+  newTextureId,
   useModel,
 } from "../stores/modelStore";
 
@@ -32,7 +34,7 @@ interface BbElement {
   rotation?: Vec3;
   inflate?: number;
   color?: number;
-  faces?: Record<FaceName, BbFace>;
+  faces?: Record<string, BbFace>;
   uuid?: string;
   rescale?: boolean;
   locked?: boolean;
@@ -86,10 +88,50 @@ interface ParsedModel {
   resolution: [number, number];
 }
 
+/** bbmodel face texture index -> our stable texture id (null = dropped texture). */
+type TextureIdMap = Map<number, string | null>;
+
+const isVec3 = (v: unknown): v is Vec3 =>
+  Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
+/**
+ * bbmodel faces store a texture *index* into the texture list. Ours store a
+ * stable id, so every face has to be remapped on import and export.
+ */
+function toFace(
+  raw: BbFace | undefined,
+  textureIds: TextureIdMap,
+  resolution: [number, number]
+): { uv: UVRect; texture: string | null } | null {
+  if (!raw || !Array.isArray(raw.uv) || raw.uv.length < 4) return null;
+  const [x1, y1, x2, y2] = raw.uv.slice(0, 4).map(Number);
+  if (![x1, y1, x2, y2].every((n) => Number.isFinite(n))) return null;
+  const uv = clampUV([x1, y1, x2, y2], resolution);
+  const index = typeof raw.texture === "number" ? raw.texture : null;
+  return { uv, texture: index != null ? textureIds.get(index) ?? null : null };
+}
+
+function toFaces(
+  raw: unknown,
+  textureIds: TextureIdMap,
+  resolution: [number, number]
+): CubeFaces | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as Record<string, BbFace>;
+  const out: CubeFaces = {};
+  for (const face of FACE_ORDER) {
+    const parsed = toFace(record[face], textureIds, resolution);
+    if (parsed) out[face] = parsed;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function toCube(
   el: BbElement,
   index: number,
   boneId: string | null,
+  textureIds: TextureIdMap,
+  resolution: [number, number],
   inHitbox = false
 ): Cube {
   return {
@@ -103,10 +145,10 @@ function toCube(
       (el.from[2] + el.to[2]) / 2,
     ],
     rotation: el.rotation ?? [0, 0, 0],
-    inflate: el.inflate,
+    inflate: typeof el.inflate === "number" && Number.isFinite(el.inflate) ? el.inflate : undefined,
     marker: el.color,
     color: BB_MARKER_COLORS[((el.color ?? 0) % BB_MARKER_COLORS.length + BB_MARKER_COLORS.length) % BB_MARKER_COLORS.length],
-    faces: el.faces as CubeFaces | undefined,
+    faces: toFaces(el.faces, textureIds, resolution),
     boneId,
     shade: el.shade === false ? false : undefined,
     hidden: el.visibility === false || inHitbox ? true : undefined,
@@ -118,6 +160,32 @@ export function parseBbmodel(json: string): ParsedModel {
   if (!data || !Array.isArray(data.elements)) {
     throw new Error("Not a valid .bbmodel file");
   }
+
+  const resolution: [number, number] = data.resolution
+    ? [data.resolution.width, data.resolution.height]
+    : [256, 256];
+
+  // Textures first: cubes need the index -> id map. Textures that are not
+  // embedded (external file paths) are dropped, and because the map is built
+  // per original index, the remaining textures never shift.
+  const textureIds: TextureIdMap = new Map();
+  const textures: ProjectTexture[] = [];
+  (data.textures ?? []).forEach((t, i) => {
+    if (typeof t.source !== "string" || !t.source.startsWith("data:")) {
+      textureIds.set(i, null);
+      return;
+    }
+    const id = newTextureId();
+    textureIds.set(i, id);
+    const renderMode: RenderMode = (["emissive", "additive", "layered"] as const).find(
+      (m) => m === t.render_mode
+    ) ?? "default";
+    const sides: RenderSides = t.render_sides === "front" || t.render_sides === "double" ? t.render_sides : "auto";
+    const tex: ProjectTexture = { id, source: t.source, name: t.name ?? `texture-${i}.png` };
+    // Only keep non-default settings so plain models stay plain
+    if (renderMode !== "default" || sides !== "auto") tex.material = { renderMode, sides };
+    textures.push(tex);
+  });
 
   // Walk the outliner tree: groups become bones, strings are cube uuids
   const bones: Bone[] = [];
@@ -163,27 +231,12 @@ export function parseBbmodel(json: string): ParsedModel {
   walk(data.outliner ?? [], null);
 
   const cubes = data.elements
-    .filter((el) => el.type === "cube" || Array.isArray(el.from))
+    .filter((el) => (el.type === "cube" || isVec3(el.from)) && isVec3(el.from) && isVec3(el.to))
     .map((el, i) => {
       const parentId = cubeParent.get(el.uuid ?? "") ?? null;
-      return toCube(el, i, parentId, parentId != null && hitboxGroups.has(parentId));
+      return toCube(el, i, parentId, textureIds, resolution, parentId != null && hitboxGroups.has(parentId));
     });
 
-  const textures: ProjectTexture[] = (data.textures ?? [])
-    .filter((t) => typeof t.source === "string" && t.source.startsWith("data:"))
-    .map((t, i): ProjectTexture => {
-      const renderMode: RenderMode = (["emissive", "additive", "layered"] as const).find(
-        (m) => m === t.render_mode
-      ) ?? "default";
-      const sides: RenderSides = t.render_sides === "front" || t.render_sides === "double" ? t.render_sides : "auto";
-      const tex: ProjectTexture = { source: t.source as string, name: t.name ?? `texture-${i}.png` };
-      // Only keep non-default settings so plain models stay plain
-      if (renderMode !== "default" || sides !== "auto") tex.material = { renderMode, sides };
-      return tex;
-    });
-  const resolution: [number, number] = data.resolution
-    ? [data.resolution.width, data.resolution.height]
-    : [256, 256];
   return {
     name: data.name || "Imported model",
     cubes,
@@ -193,7 +246,7 @@ export function parseBbmodel(json: string): ParsedModel {
   };
 }
 
-function toBbElement(cube: Cube): BbElement {
+function toBbElement(cube: Cube, textureIndexById: Map<string, number>): BbElement {
   const el: BbElement = {
     name: cube.name,
     rescale: false,
@@ -202,7 +255,7 @@ function toBbElement(cube: Cube): BbElement {
     to: cube.to,
     autouv: 0,
     color: cube.marker ?? 0,
-    faces: {} as Record<FaceName, BbFace>,
+    faces: {} as Record<string, BbFace>,
     type: "cube",
     visibility: cube.hidden ? false : undefined,
     uuid: cube.id.includes("-") ? cube.id : randomUuid(),
@@ -217,11 +270,15 @@ function toBbElement(cube: Cube): BbElement {
   ];
 
   const faces = cube.faces ?? {};
-  const outFaces = el.faces as Record<FaceName, BbFace>;
+  const outFaces = el.faces as Record<string, BbFace>;
   for (const face of FACE_ORDER) {
     const f = faces[face];
     if (f && f.uv) {
-      outFaces[face] = { uv: f.uv, texture: f.texture ?? 0 };
+      // bbmodel faces reference textures by index; unknown ids fall back to the first texture
+      outFaces[face] = {
+        uv: f.uv,
+        texture: f.texture != null ? textureIndexById.get(f.texture) ?? 0 : 0,
+      };
     } else {
       // Zero-size UV (all pixels at one point) — valid, renders untextured
       outFaces[face] = { uv: [0, 0, 0, 0], texture: 0 };
@@ -265,7 +322,8 @@ export function serializeBbmodel(
   textures: ProjectTexture[],
   resolution: [number, number]
 ): string {
-  const elements = cubes.map(toBbElement);
+  const textureIndexById = new Map(textures.map((t, i) => [t.id, i]));
+  const elements = cubes.map((c) => toBbElement(c, textureIndexById));
 
   // Group cube element uuids under their bones
   const cubesByBone = new Map<string | null, string[]>();
@@ -342,8 +400,11 @@ export async function exportBbmodel(): Promise<boolean> {
     filters: [BB_FILTER],
     contents,
   });
-  if (saved && cubes.length > 0) {
-    pushRecent({ name, format: "bbmodel", data: contents });
+  if (saved) {
+    useModel.getState().markSaved();
+    if (cubes.length > 0) {
+      pushRecent({ name, format: "bbmodel", data: contents });
+    }
   }
   return saved;
 }

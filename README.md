@@ -156,8 +156,7 @@ Resource Pack / Plugin
 * [x] Version compatibility
 
 ## Phase 4 — Animation
-
-* [ ] Timeline
+* [x] Timeline
 * [ ] Keyframes
 * [ ] Animation editor
 * [ ] Animation preview

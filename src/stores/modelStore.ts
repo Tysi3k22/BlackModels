@@ -6,6 +6,7 @@ import type { ValidationIssue } from "../lib/validate";
 import { createHistorySlice, type HistorySliceActions } from "./slices/historySlice";
 import { createModelSlice, type ModelSliceActions } from "./slices/modelSlice";
 import { createTextureSlice, type TextureSliceActions } from "./slices/textureSlice";
+import { createAnimationSlice, type AnimationSliceState, type AnimationSliceActions } from "./slices/animationSlice";
 
 /** Content fields of the model, shared by every slice. */
 export interface ModelData {
@@ -31,9 +32,9 @@ export interface ModelData {
   transformErrors: string[] | null;
 }
 
-export interface ModelState extends ModelData, ModelSliceActions, TextureSliceActions, HistorySliceActions {}
+export interface ModelState extends ModelData, ModelSliceActions, TextureSliceActions, HistorySliceActions, AnimationSliceState, AnimationSliceActions {}
 
-export const useModel = create<ModelState>()((...a) => ({
+export const useModel = create<ModelState>()((set, get) => ({
   name: "Untitled",
   cubes: [],
   bones: [],
@@ -48,9 +49,10 @@ export const useModel = create<ModelState>()((...a) => ({
   issues: [],
   meta: undefined,
   transformErrors: null,
-  ...createModelSlice(...a),
-  ...createTextureSlice(...a),
-  ...createHistorySlice(...a),
+  ...createAnimationSlice(set, get),
+  ...createModelSlice(set, get),
+  ...createTextureSlice(set, get),
+  ...createHistorySlice(set, get),
 }));
 
 // Dev-only hook for live testing / debugging in the browser

@@ -73,7 +73,7 @@ export const createModelSlice: StateCreator<ModelState, [], [], ModelSliceAction
       // New bone pivots at the parent's origin (or model origin) so it starts
       // as a clean joint; the pivot can then be moved with the gizmo.
       const parent = state.bones.find((b) => b.id === (parentId ?? state.selectedId));
-      const origin: Vec3 = parent ? [...parent.origin] : [0, 0, 0];
+      const origin: Vec3 = parent ? [parent.origin[0], parent.origin[1], parent.origin[2]] : [0, 0, 0];
       const bone: Bone = {
         id,
         name: `Bone ${n}`,

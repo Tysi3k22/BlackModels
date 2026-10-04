@@ -3,6 +3,7 @@ import { useApp } from "../constants"
 import NavBar from "../components/Nav";
 import ModelEditor from "./ModelEditor";
 import TextureEditor from "./TextureEditor";
+import AnimationEditor from "./AnimationEditor";
 import { useModel } from "../stores/modelStore";
 
 export default function EditorMenu() {
@@ -34,7 +35,7 @@ export default function EditorMenu() {
 
             {tab === "Model" && <ModelEditor />}
             {tab === "Texture" && <TextureEditor />}
-            {tab === "Animation" && <div>Animation Editor</div>}
+            {tab === "Animation" && <AnimationEditor />}
         </main>
     )
 };

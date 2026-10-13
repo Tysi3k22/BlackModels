@@ -16,6 +16,8 @@ import { clampUV } from "./uv";
 import { openTextFile, saveTextFile } from "./files";
 import { pushRecent } from "./recent";
 import { parseBbmodel } from "./bbmodel";
+import { parseAnimations } from "./animationData";
+import type { AnimationClip } from "../stores/slices/animationSlice";
 
 const PROJECT_EXTENSION = "bmproj";
 const PROJECT_FILTER_NAME = "BlackModels Project";
@@ -35,6 +37,8 @@ export interface ProjectFile {
   textures: ProjectTexture[];
   bones: Bone[];
   cubes: Cube[];
+  /** Animation clips. Optional: files saved before animations existed simply lack it. */
+  animations?: AnimationClip[];
   /** Optional metadata carried through import/export (bbmodel meta, project header, etc.). */
   meta?: Record<string, unknown>;
 }
@@ -46,6 +50,7 @@ export interface ParsedModel {
   bones: Bone[];
   textures: ProjectTexture[];
   resolution: [number, number];
+  animations?: AnimationClip[];
   /** Optional metadata carried through import (bbmodel meta, project header, etc.). */
   meta?: Record<string, unknown>;
 }
@@ -61,6 +66,9 @@ export function serializeProject(): string {
     bones: state.bones,
     cubes: state.cubes,
   };
+  if (state.animationClips.length > 0) {
+    project.animations = state.animationClips;
+  }
   // Plain JSON: embedded base64 textures dominate the size, so pretty-printing
   // only inflates the file and slows the write down.
   if (state.meta && Object.keys(state.meta).length > 0) {
@@ -277,12 +285,14 @@ export function parseProject(json: string): ParsedModel {
     : null;
   const bones = parseBones(data.bones);
   const cubes = parseCubes(data.cubes, bones, textureIds, legacyTextureIds, resolution);
+  const animations = parseAnimations(data.animations);
   return {
     name: typeof data.name === "string" && data.name ? data.name : "Untitled",
     cubes,
     bones,
     textures,
     resolution,
+    animations,
   };
 }
 
@@ -373,5 +383,6 @@ export function newProject(): void {
     bones: [],
     textures: [],
     resolution: [256, 256],
+    animations: [],
   });
 }

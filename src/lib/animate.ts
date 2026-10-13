@@ -3,6 +3,8 @@ import type {
   AnimationClip,
   AnimationKeyframe,
   AnimationTrack,
+  Channel,
+  Interpolation,
 } from "../stores/slices/animationSlice";
 
 /**
@@ -21,8 +23,6 @@ export type PoseMap = Map<string, Pose>;
 
 export const poseKey = (kind: "cube" | "bone", id: string): string => `${kind}:${id}`;
 
-type Channel = "position" | "rotation" | "scale";
-
 const lerpVec = (a: Vec3, b: Vec3, f: number): Vec3 => [
   a[0] + (b[0] - a[0]) * f,
   a[1] + (b[1] - a[1]) * f,
@@ -31,33 +31,68 @@ const lerpVec = (a: Vec3, b: Vec3, f: number): Vec3 => [
 
 export const addVec = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 
+/** Uniform Catmull-Rom spline through p1 -> p2 (p0 / p3 are the neighbours). */
+const catmull = (p0: number, p1: number, p2: number, p3: number, t: number): number => {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2 * p1 +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+  );
+};
+
+const catmullVec = (p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: number): Vec3 => [
+  catmull(p0[0], p1[0], p2[0], p3[0], t),
+  catmull(p0[1], p1[1], p2[1], p3[1], t),
+  catmull(p0[2], p1[2], p2[2], p3[2], t),
+];
+
+const interpOf = (k: AnimationKeyframe, ch: Channel): Interpolation =>
+  k.interpolation?.[ch] ?? "linear";
+
 /**
  * Value of one channel at `time`. Only keyframes that define the channel take
  * part. Before the first one the first value is held, after the last one the
- * last value is held. `step` on the previous keyframe disables blending.
+ * last value is held. `step` on the previous keyframe disables blending;
+ * `catmullrom` on either side of the span uses a spline through the
+ * neighbouring keyframes (missing neighbours fall back to the span's ends).
  */
 function sampleChannel(
   keys: AnimationKeyframe[],
   channel: Channel,
   time: number
 ): Vec3 | undefined {
-  let prev: AnimationKeyframe | undefined;
-  let next: AnimationKeyframe | undefined;
-  for (const k of keys) {
-    if (!k[channel]) continue;
-    if (k.time <= time) prev = k;
-    else {
-      next = k;
-      break;
-    }
+  const list = keys.filter((k) => k[channel]);
+  if (list.length === 0) return undefined;
+
+  let i = -1;
+  for (let j = 0; j < list.length; j++) {
+    if (list[j].time <= time) i = j;
+    else break;
   }
-  if (!prev && !next) return undefined;
-  if (!prev) return next![channel] as Vec3;
+  if (i < 0) return list[0][channel] as Vec3;
+
+  const prev = list[i];
   const a = prev[channel] as Vec3;
-  if (!next || prev.interpolation === "step") return a;
+  const next = list[i + 1];
+  if (!next) return a;
+
+  const pm = interpOf(prev, channel);
+  if (pm === "step") return a;
   const span = next.time - prev.time;
   if (span <= 0) return a;
-  return lerpVec(a, next[channel] as Vec3, (time - prev.time) / span);
+  const f = (time - prev.time) / span;
+  const b = next[channel] as Vec3;
+
+  if (pm === "catmullrom" || interpOf(next, channel) === "catmullrom") {
+    const p0 = (list[i - 1]?.[channel] as Vec3 | undefined) ?? a;
+    const p3 = (list[i + 2]?.[channel] as Vec3 | undefined) ?? b;
+    return catmullVec(p0, a, b, p3, f);
+  }
+  return lerpVec(a, b, f);
 }
 
 export function sampleTrack(track: AnimationTrack, time: number): Pose | null {

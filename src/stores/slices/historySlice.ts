@@ -96,6 +96,8 @@ export const createHistorySlice: StateCreator<ModelState, [], [], HistorySliceAc
       name: t.name,
       ...(t.material ? { material: t.material } : {}),
     }));
+    const clips = data.animations ?? [];
+    const prev = get();
     set({
       past: [],
       future: [],
@@ -109,6 +111,15 @@ export const createHistorySlice: StateCreator<ModelState, [], [], HistorySliceAc
       meta: data.meta,
       selectedId: null,
       selectedKind: null,
+      // Animations belong to the model: replace them and reset playback.
+      animationClips: clips,
+      selectedAnimationClipId: clips[0]?.id ?? null,
+      playback: { playing: false, time: 0, speed: prev.playback.speed },
+      timeline: {
+        ...prev.timeline,
+        playhead: 0,
+        duration: Math.max(5, ...clips.map((c) => c.length)),
+      },
     });
   },
 });

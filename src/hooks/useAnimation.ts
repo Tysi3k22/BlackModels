@@ -7,14 +7,18 @@ import type { AnimationClip } from "../stores/slices/animationSlice";
  * drives timeline position + current clip state.
  *
  * Owns the requestAnimationFrame playback loop (runs only while playing).
+ *
+ * Deliberately does NOT subscribe to the playhead / current time: those change
+ * every frame while playing, so components that need them subscribe on their
+ * own (small leaf components), and everything else stays still.
  */
 export function useAnimation() {
   const clips = useModel((s) => s.animationClips);
   const selectedClipId = useModel((s) => s.selectedAnimationClipId);
   const playing = useModel((s) => s.playback.playing);
-  const time = useModel((s) => s.playback.time);
-  const timeline = useModel((s) => s.timeline);
   const speed = useModel((s) => s.playback.speed);
+  const duration = useModel((s) => s.timeline.duration);
+  const snapSeconds = useModel((s) => s.timeline.snapSeconds);
   const tick = useModel((s) => s.tick);
 
   /** Clip boundaries for timeline rendering, derived (not stored) so it can't go stale. */
@@ -65,9 +69,9 @@ export function useAnimation() {
     clips,
     selectedClipId,
     playing,
-    time,
     speed,
-    timeline,
+    duration,
+    snapSeconds,
     timelineClipMap,
     play,
     pause,

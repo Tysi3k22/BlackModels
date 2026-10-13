@@ -14,6 +14,16 @@ import {
   newTextureId,
   useModel,
 } from "../stores/modelStore";
+import {
+  CHANNELS,
+  roundTime,
+  type AnimationClip,
+  type AnimationKeyframe,
+  type AnimationTrack,
+  type Channel,
+  type Interpolation,
+  type LoopMode,
+} from "../stores/slices/animationSlice";
 
 /** Blockbench .bbmodel import/export for cube-based ("free" / generic) models. */
 
@@ -64,6 +74,37 @@ interface BbTexture {
   render_sides?: string;
 }
 
+/** One bbmodel keyframe = one channel at one time (x/y/z are numbers or strings). */
+interface BbKeyframe {
+  channel: string;
+  data_points: { x: number | string; y: number | string; z: number | string }[];
+  uuid?: string;
+  time: number;
+  color?: number;
+  interpolation?: string;
+}
+
+interface BbAnimator {
+  name: string;
+  type: string;
+  keyframes: BbKeyframe[];
+}
+
+interface BbAnimation {
+  uuid?: string;
+  name: string;
+  loop?: string;
+  override?: boolean;
+  length: number;
+  snapping?: number;
+  selected?: boolean;
+  anim_time_update?: string;
+  blend_weight?: string;
+  start_delay?: string;
+  loop_delay?: string;
+  animators?: Record<string, BbAnimator>;
+}
+
 interface BbModel {
   meta: Record<string, unknown>;
   name?: string;
@@ -76,6 +117,7 @@ interface BbModel {
   elements?: BbElement[];
   outliner?: unknown[];
   textures?: BbTexture[];
+  animations?: BbAnimation[];
 }
 
 /** Shape of a parsed .bbmodel that the store accepts. */
@@ -85,6 +127,7 @@ export interface ParsedBbmodel {
   bones: Bone[];
   textures: ProjectTexture[];
   resolution: [number, number];
+  animations: AnimationClip[];
   meta?: Record<string, unknown>;
 }
 
@@ -96,6 +139,9 @@ type TextureIdMap = Map<number, string | null>;
 
 const isVec3 = (v: unknown): v is Vec3 =>
   Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const toUuid = (id: string): string => (UUID_RE.test(id) ? id : randomUuid());
 
 /**
  * Best-effort extraction of the Blockbench format version + model format.
@@ -178,6 +224,124 @@ function toCube(
     shade: el.shade === false ? false : undefined,
     hidden: el.visibility === false || inHitbox ? true : undefined,
   };
+}
+
+/** Numeric value of a data point; Molang expressions / junk give null. */
+function toNumber(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+const BB_CHANNELS: readonly string[] = CHANNELS;
+
+/**
+ * bbmodel animations -> clips. bbmodel keeps one keyframe per channel and time
+ * (each with its own interpolation) under an animator keyed by the group uuid;
+ * ours merge the channels of one time into one keyframe. Animators that point
+ * at neither an imported bone nor a cube (effects, locators…) and channels we
+ * cannot represent (sound, particle, timeline, Molang, bezier) are skipped or
+ * simplified, with a console warning.
+ */
+function parseBbAnimations(
+  raw: unknown,
+  boneIdByUuid: Map<string, string>,
+  cubeIds: Set<string>
+): AnimationClip[] {
+  if (!Array.isArray(raw)) return [];
+  const usedIds = new Set<string>();
+  const out: AnimationClip[] = [];
+  let skippedAnimators = 0;
+  let skippedChannels = 0;
+  let expressions = 0;
+  let beziers = 0;
+
+  raw.forEach((a: BbAnimation, i) => {
+    if (!a || typeof a !== "object") return;
+    let id = typeof a.uuid === "string" && a.uuid ? a.uuid : `clip-${i + 1}`;
+    if (usedIds.has(id)) id = `${id}-${i + 1}`;
+    usedIds.add(id);
+
+    const tracks: AnimationTrack[] = [];
+    for (const [uuid, animator] of Object.entries(a.animators ?? {})) {
+      const boneId = boneIdByUuid.get(uuid);
+      const target: { kind: "bone" | "cube"; id: string } | null = boneId
+        ? { kind: "bone", id: boneId }
+        : cubeIds.has(uuid)
+          ? { kind: "cube", id: uuid }
+          : null;
+      if (!target || !Array.isArray(animator?.keyframes)) {
+        skippedAnimators++;
+        continue;
+      }
+
+      const byTime = new Map<number, AnimationKeyframe>();
+      for (const k of animator.keyframes) {
+        if (!BB_CHANNELS.includes(k?.channel)) {
+          skippedChannels++;
+          continue;
+        }
+        const channel = k.channel as Channel;
+        const time = typeof k.time === "number" && Number.isFinite(k.time) ? roundTime(Math.max(0, k.time)) : null;
+        const dp = Array.isArray(k.data_points) ? k.data_points[0] : undefined;
+        if (time == null || !dp) continue;
+
+        const xyz = [dp.x, dp.y, dp.z].map((v) => {
+          const n = toNumber(v);
+          if (n == null) expressions++;
+          return n ?? 0;
+        }) as Vec3;
+
+        let interp: Interpolation = "linear";
+        if (k.interpolation === "catmullrom" || k.interpolation === "step") interp = k.interpolation;
+        else if (k.interpolation === "bezier") beziers++;
+
+        const kf = byTime.get(time) ?? { time };
+        kf[channel] = xyz;
+        if (interp !== "linear") kf.interpolation = { ...kf.interpolation, [channel]: interp };
+        byTime.set(time, kf);
+      }
+
+      const keyframes = [...byTime.values()].sort((x, y) => x.time - y.time);
+      if (keyframes.length === 0) continue;
+      tracks.push({
+        id: `track-${i + 1}-${tracks.length + 1}`,
+        targetId: target.id,
+        targetKind: target.kind,
+        keyframes,
+      });
+    }
+
+    const lastKey = tracks.reduce(
+      (m, t) => t.keyframes.reduce((mm, k) => Math.max(mm, k.time), m),
+      0
+    );
+    const declared = typeof a.length === "number" && Number.isFinite(a.length) ? a.length : 0;
+    const clip: AnimationClip = {
+      id,
+      name: a.name || `Animation ${i + 1}`,
+      length: roundTime(Math.max(0.1, lastKey, declared)),
+      tracks,
+    };
+    if (a.loop === "loop" || a.loop === "hold") clip.loopMode = a.loop as LoopMode;
+    if (a.override === true) clip.override = true;
+    if (typeof a.snapping === "number" && Number.isFinite(a.snapping) && a.snapping > 0) {
+      clip.snapping = a.snapping;
+    }
+    out.push(clip);
+  });
+
+  if (skippedAnimators || skippedChannels || expressions || beziers) {
+    console.warn(
+      `bbmodel animations: skipped ${skippedAnimators} animator(s) without a bone/cube, ` +
+        `${skippedChannels} non-transform keyframe(s); ${expressions} Molang/invalid value(s) read as 0; ` +
+        `${beziers} bezier keyframe(s) read as linear.`
+    );
+  }
+  return out;
 }
 
 export function parseBbmodel(json: string): ParsedBbmodel {
@@ -276,17 +440,24 @@ export function parseBbmodel(json: string): ParsedBbmodel {
       return toCube(el, i, parentId, textureIds, resolution, parentId != null && hitboxGroups.has(parentId));
     });
 
+  const animations = parseBbAnimations(
+    data.animations,
+    boneIdByUuid,
+    new Set(cubes.map((c) => c.id))
+  );
+
   return {
     name: data.name || "Imported model",
     cubes,
     bones,
     textures,
     resolution,
+    animations,
     meta,
   };
 }
 
-function toBbElement(cube: Cube, textureIndexById: Map<string, number>): BbElement {
+function toBbElement(cube: Cube, textureIndexById: Map<string, number>, uuid: string): BbElement {
   const el: BbElement = {
     name: cube.name,
     rescale: false,
@@ -298,7 +469,7 @@ function toBbElement(cube: Cube, textureIndexById: Map<string, number>): BbEleme
     faces: {} as Record<string, BbFace>,
     type: "cube",
     visibility: cube.hidden ? false : undefined,
-    uuid: cube.id.includes("-") ? cube.id : randomUuid(),
+    uuid,
   };
   if (cube.inflate !== undefined) el.inflate = cube.inflate;
   if (cube.shade === false) el.shade = false;
@@ -339,13 +510,13 @@ function randomUuid(): string {
   return u;
 }
 
-function toBbGroup(bone: Bone, cubeUuids: string[], childGroups: BbGroup[]): BbGroup {
+function toBbGroup(bone: Bone, uuid: string, cubeUuids: string[], childGroups: BbGroup[]): BbGroup {
   return {
     name: bone.name,
     origin: bone.origin,
     rotation: bone.rotation.some((r) => r !== 0) ? bone.rotation : undefined,
     color: bone.marker ?? 0,
-    uuid: bone.id.includes("-") ? bone.id : randomUuid(),
+    uuid,
     export: true,
     isOpen: true,
     locked: false,
@@ -355,15 +526,68 @@ function toBbGroup(bone: Bone, cubeUuids: string[], childGroups: BbGroup[]): BbG
   };
 }
 
+/** Clip -> bbmodel animation. Animators are keyed by the same uuids the groups / cubes are written with. */
+function toBbAnimation(
+  clip: AnimationClip,
+  bones: Map<string, { name: string; uuid: string }>,
+  cubes: Map<string, { name: string; uuid: string }>
+): BbAnimation {
+  const animators: Record<string, BbAnimator> = {};
+  for (const track of clip.tracks) {
+    const target = (track.targetKind === "bone" ? bones : cubes).get(track.targetId);
+    if (!target) continue; // target no longer exists
+    const keyframes: BbKeyframe[] = [];
+    for (const kf of track.keyframes) {
+      for (const channel of CHANNELS) {
+        const v = kf[channel];
+        if (!v) continue;
+        keyframes.push({
+          channel,
+          data_points: [{ x: v[0], y: v[1], z: v[2] }],
+          uuid: randomUuid(),
+          time: kf.time,
+          color: -1,
+          interpolation: kf.interpolation?.[channel] ?? "linear",
+        });
+      }
+    }
+    animators[target.uuid] = {
+      name: target.name,
+      type: track.targetKind === "bone" ? "bone" : "cube",
+      keyframes,
+    };
+  }
+  return {
+    uuid: toUuid(clip.id),
+    name: clip.name,
+    loop: clip.loopMode ?? "once",
+    override: clip.override === true,
+    length: clip.length,
+    snapping: clip.snapping ?? 20,
+    selected: false,
+    anim_time_update: "",
+    blend_weight: "",
+    start_delay: "",
+    loop_delay: "",
+    animators,
+  };
+}
+
 export function serializeBbmodel(
   name: string,
   cubes: Cube[],
   bones: Bone[],
   textures: ProjectTexture[],
-  resolution: [number, number]
+  resolution: [number, number],
+  animations: AnimationClip[] = []
 ): string {
   const textureIndexById = new Map(textures.map((t, i) => [t.id, i]));
-  const elements = cubes.map((c) => toBbElement(c, textureIndexById));
+  // Written once so groups/elements and animators always agree on their uuids.
+  const cubeInfo = new Map(cubes.map((c) => [c.id, { name: c.name, uuid: toUuid(c.id) }]));
+  const boneInfo = new Map(bones.map((b) => [b.id, { name: b.name, uuid: toUuid(b.id) }]));
+  const elements = cubes.map((c) =>
+    toBbElement(c, textureIndexById, (cubeInfo.get(c.id) as { uuid: string }).uuid)
+  );
 
   // Group cube element uuids under their bones
   const cubesByBone = new Map<string | null, string[]>();
@@ -381,6 +605,7 @@ export function serializeBbmodel(
     const childBones = bones.filter((b) => b.parentId === bone.id);
     const g = toBbGroup(
       bone,
+      (boneInfo.get(bone.id) as { uuid: string }).uuid,
       cubesByBone.get(bone.id) ?? [],
       childBones.map(buildGroup)
     );
@@ -425,6 +650,10 @@ export function serializeBbmodel(
       relative_path: `../${t.name}`,
       source: t.source,
     })),
+    animations:
+      animations.length > 0
+        ? animations.map((clip) => toBbAnimation(clip, boneInfo, cubeInfo))
+        : undefined,
   };
   // Undefined fields are dropped and defaults restored for the JSON output
   const clean = JSON.parse(JSON.stringify(model)) as BbModel;
@@ -433,9 +662,9 @@ export function serializeBbmodel(
 }
 
 export async function exportBbmodel(): Promise<boolean> {
-  const { name, cubes, bones, textures, resolution } = useModel.getState();
+  const { name, cubes, bones, textures, resolution, animationClips } = useModel.getState();
   const safeName = (name || "model").replace(/[^\w\- ]+/g, "_");
-  const contents = serializeBbmodel(name, cubes, bones, textures, resolution);
+  const contents = serializeBbmodel(name, cubes, bones, textures, resolution, animationClips);
   const saved = await saveTextFile({
     defaultName: `${safeName}.${BB_EXTENSION}`,
     filters: [BB_FILTER],

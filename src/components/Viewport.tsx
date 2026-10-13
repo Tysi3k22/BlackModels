@@ -44,7 +44,8 @@ export function EditorScene({ mode }: { mode: "model" | "texture" | "animation" 
   return (
     <Canvas
       camera={{ position: [48, 40, 48], fov: 50, near: 0.1, far: 2000 }}
-      dpr={[1, 2]}
+      // The animation preview redraws every frame: cap the pixel ratio there.
+      dpr={mode === "animation" ? [1, 1.5] : [1, 2]}
       onPointerMissed={() => {
         if (mode === "model" && !isGizmoBusy()) select(null);
       }}

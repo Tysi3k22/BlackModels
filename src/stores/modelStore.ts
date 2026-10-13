@@ -34,7 +34,7 @@ export interface ModelData {
 
 export interface ModelState extends ModelData, ModelSliceActions, TextureSliceActions, HistorySliceActions, AnimationSliceState, AnimationSliceActions {}
 
-export const useModel = create<ModelState>()((set, get) => ({
+export const useModel = create<ModelState>()((set, get, api) => ({
   name: "Untitled",
   cubes: [],
   bones: [],
@@ -49,10 +49,10 @@ export const useModel = create<ModelState>()((set, get) => ({
   issues: [],
   meta: undefined,
   transformErrors: null,
-  ...createAnimationSlice(set, get),
-  ...createModelSlice(set, get),
-  ...createTextureSlice(set, get),
-  ...createHistorySlice(set, get),
+  ...createAnimationSlice(set, get, api),
+  ...createModelSlice(set, get, api),
+  ...createTextureSlice(set, get, api),
+  ...createHistorySlice(set, get, api),
 }));
 
 // Dev-only hook for live testing / debugging in the browser
@@ -60,22 +60,29 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
   (window as unknown as { __model?: typeof useModel }).__model = useModel;
 }
 
-// Live Minecraft constraint validation: recompute whenever model content changes.
-useModel.subscribe((state) => {
-  const issues = validateModel(state.cubes, state.bones, state.textures, state.resolution);
-  const prev = useModel.getState().issues;
+// Live Minecraft constraint validation: recompute only when model content changes.
+useModel.subscribe((state, prev) => {
   if (
-    issues.length !== prev.length ||
-    issues.some((issue, i) => issue.severity !== prev[i]?.severity || issue.message !== prev[i]?.message)
+    state.cubes === prev.cubes &&
+    state.bones === prev.bones &&
+    state.textures === prev.textures &&
+    state.resolution === prev.resolution
+  ) {
+    return;
+  }
+  const issues = validateModel(state.cubes, state.bones, state.textures, state.resolution);
+  const prevIssues = state.issues;
+  if (
+    issues.length !== prevIssues.length ||
+    issues.some((issue, i) => issue.severity !== prevIssues[i]?.severity || issue.message !== prevIssues[i]?.message)
   ) {
     useModel.setState({ issues });
   }
 });
 
-// Live transform-error banner: clear when errors disappear.
+// Live transform-error banner: clear when errors disappear safely.
 useModel.subscribe((state) => {
-  const prev = useModel.getState().transformErrors;
-  if (prev && !state.transformErrors) {
+  if (state.transformErrors && state.transformErrors.length === 0) {
     useModel.setState({ transformErrors: null });
   }
 });

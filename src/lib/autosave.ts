@@ -119,6 +119,7 @@ export function startAutosave(): () => void {
       state.cubes !== prev.cubes ||
       state.bones !== prev.bones ||
       state.textures !== prev.textures ||
+      state.animationClips !== prev.animationClips ||
       state.name !== prev.name;
     if (changed) schedule();
   });

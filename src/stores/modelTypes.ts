@@ -1,5 +1,7 @@
 /** Pure model data types shared by the store, its slices and the file formats. */
 
+import type { AnimationClip } from "./slices/animationSlice";
+
 /** bbmodel marker colors used by Blockbench (index into this palette). */
 export const BB_MARKER_COLORS = [
   "#A7E1F5", "#FF94B5", "#A6FF94", "#FFFF94", "#D49EE8",
@@ -157,4 +159,6 @@ export interface ProjectImport {
   bones?: Bone[];
   textures?: ProjectTextureInput[];
   resolution?: [number, number];
+  /** Animation clips; missing = none (replaces the current ones). */
+  animations?: AnimationClip[];
 }

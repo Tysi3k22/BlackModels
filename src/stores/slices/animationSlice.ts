@@ -1,13 +1,24 @@
 import type { StateCreator } from "zustand";
+import type { ModelState } from "../modelStore";
 
-export type Interpolation = "linear" | "step";
+/** `step` holds the value until the next keyframe; `catmullrom` is a smooth spline. */
+export type Interpolation = "linear" | "catmullrom" | "step";
+export type Channel = "position" | "rotation" | "scale";
+export const CHANNELS: Channel[] = ["position", "rotation", "scale"];
+
+/** once = play and stop, hold = same but stays on the last frame in-game, loop = repeat. */
+export type LoopMode = "once" | "hold" | "loop";
 
 export interface AnimationClip {
   id: string;
   name: string;
   length: number; // seconds
-  /** When true, playback wraps around at the end instead of stopping. */
-  loop?: boolean;
+  /** Missing = "once". */
+  loopMode?: LoopMode;
+  /** bbmodel `override`: the clip replaces the default pose instead of blending. */
+  override?: boolean;
+  /** bbmodel `snapping` (frames per second); kept for round-tripping. */
+  snapping?: number;
   tracks: AnimationTrack[];
 }
 
@@ -23,8 +34,8 @@ export interface AnimationKeyframe {
   position?: [number, number, number];
   rotation?: [number, number, number];
   scale?: [number, number, number];
-  /** How to blend from this keyframe to the next one. Missing = "linear". */
-  interpolation?: Interpolation;
+  /** Per channel, like bbmodel. Missing channel = "linear". */
+  interpolation?: Partial<Record<Channel, Interpolation>>;
 }
 
 export interface PlaybackState {
@@ -56,7 +67,8 @@ export interface AnimationSliceActions {
   renameClip: (id: string, name: string) => void;
   /** Never shorter than the clip's last keyframe, so no keyframe is cut off. */
   setClipLength: (id: string, length: number) => void;
-  setClipLoop: (id: string, loop: boolean) => void;
+  setClipLoopMode: (id: string, mode: LoopMode) => void;
+  setClipOverride: (id: string, override: boolean) => void;
 
   addTrackToClip: (
     clipId: string,
@@ -117,7 +129,7 @@ function newId(prefix: string): string {
 }
 
 /** Keyframe times are stored with 4 decimals so equality checks stay reliable. */
-const roundTime = (t: number): number => Number(t.toFixed(4));
+export const roundTime = (t: number): number => Number(t.toFixed(4));
 
 /** Copy a keyframe's channels to a new time (only the channels that exist). */
 function cloneChannels(src: AnimationKeyframe, time: number): AnimationKeyframe {
@@ -125,7 +137,7 @@ function cloneChannels(src: AnimationKeyframe, time: number): AnimationKeyframe 
   if (src.position) kf.position = [...src.position];
   if (src.rotation) kf.rotation = [...src.rotation];
   if (src.scale) kf.scale = [...src.scale];
-  if (src.interpolation) kf.interpolation = src.interpolation;
+  if (src.interpolation) kf.interpolation = { ...src.interpolation };
   return kf;
 }
 
@@ -136,300 +148,238 @@ function playbackEnd(s: AnimationSliceState): number {
 }
 
 export const createAnimationSlice: StateCreator<
-  AnimationSliceState & AnimationSliceActions,
+  ModelState,
   [],
   [],
-  AnimationSliceActions
-> = (set, get) => ({
-  animationClips: [],
-  selectedAnimationClipId: null,
-  playback: {
-    playing: false,
-    time: 0,
-    speed: 1,
-  },
-  timeline: {
-    duration: 5,
-    playhead: 0,
-    snapSeconds: 0.05,
-  },
+  AnimationSliceState & AnimationSliceActions
+> = (set, get) => {
+  // Every clip edit marks the model dirty, so autosave and the unsaved-changes
+  // guard see animation work too.
+  const editClips = (fn: (clips: AnimationClip[]) => AnimationClip[]) =>
+    set((s) => ({ dirty: true, animationClips: fn(s.animationClips) }));
 
-  addClip: (name: string, length: number) =>
-    set((state) => {
-      const nextId = newId("clip");
-      return {
-        animationClips: [
-          ...state.animationClips,
-          { id: nextId, name, length: Math.max(0.1, length), tracks: [] },
-        ],
-        selectedAnimationClipId: nextId,
-      };
-    }),
+  const editClip = (id: string, fn: (clip: AnimationClip) => AnimationClip) =>
+    editClips((clips) => clips.map((c) => (c.id === id ? fn(c) : c)));
 
-  removeClip: (id: string) =>
-    set((state) => ({
-      animationClips: state.animationClips.filter((c) => c.id !== id),
-      selectedAnimationClipId:
-        state.selectedAnimationClipId === id ? null : state.selectedAnimationClipId,
-    })),
+  const editTrack = (
+    clipId: string,
+    trackId: string,
+    fn: (track: AnimationTrack, clip: AnimationClip) => AnimationTrack,
+  ) =>
+    editClip(clipId, (c) => ({
+      ...c,
+      tracks: c.tracks.map((t) => (t.id === trackId ? fn(t, c) : t)),
+    }));
 
-  selectClip: (id: string | null) => set({ selectedAnimationClipId: id }),
+  const byTime = (a: AnimationKeyframe, b: AnimationKeyframe) => a.time - b.time;
 
-  renameClip: (id: string, name: string) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) =>
-        c.id === id ? { ...c, name } : c,
-      ),
-    })),
+  return {
+    animationClips: [],
+    selectedAnimationClipId: null,
+    playback: {
+      playing: false,
+      time: 0,
+      speed: 1,
+    },
+    timeline: {
+      duration: 5,
+      playhead: 0,
+      snapSeconds: 0.05,
+    },
 
-  setClipLength: (id: string, length: number) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== id) return c;
+    addClip: (name, length) =>
+      set((state) => {
+        const nextId = newId("clip");
+        return {
+          dirty: true,
+          animationClips: [
+            ...state.animationClips,
+            { id: nextId, name, length: Math.max(0.1, length), tracks: [] },
+          ],
+          selectedAnimationClipId: nextId,
+        };
+      }),
+
+    removeClip: (id) =>
+      set((state) => ({
+        dirty: true,
+        animationClips: state.animationClips.filter((c) => c.id !== id),
+        selectedAnimationClipId:
+          state.selectedAnimationClipId === id ? null : state.selectedAnimationClipId,
+      })),
+
+    selectClip: (id) => set({ selectedAnimationClipId: id }),
+
+    renameClip: (id, name) => editClip(id, (c) => ({ ...c, name })),
+
+    setClipLength: (id, length) =>
+      editClip(id, (c) => {
         const lastKey = c.tracks.reduce(
           (m, t) => t.keyframes.reduce((mm, k) => Math.max(mm, k.time), m),
           0,
         );
         return { ...c, length: roundTime(Math.max(0.1, lastKey, length)) };
       }),
-    })),
 
-  setClipLoop: (id: string, loop: boolean) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) =>
-        c.id === id ? { ...c, loop } : c,
-      ),
-    })),
+    setClipLoopMode: (id, mode) =>
+      editClip(id, (c) => ({ ...c, loopMode: mode === "once" ? undefined : mode })),
 
-  addTrackToClip: (clipId: string, targetId: string, targetKind: "cube" | "bone") =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== clipId) return c;
+    setClipOverride: (id, override) =>
+      editClip(id, (c) => ({ ...c, override: override ? true : undefined })),
+
+    addTrackToClip: (clipId, targetId, targetKind) =>
+      editClip(clipId, (c) => {
         // One track per target: a second one would just fight the first.
         if (c.tracks.some((t) => t.targetId === targetId)) return c;
-        const trackId = newId("track");
         return {
           ...c,
           tracks: [
             ...c.tracks,
-            {
-              id: trackId,
-              targetId,
-              targetKind,
-              keyframes: [],
-            },
+            { id: newId("track"), targetId, targetKind, keyframes: [] },
           ],
         };
       }),
-    })),
 
-  removeTrack: (clipId: string, trackId: string) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) =>
-        c.id === clipId
-          ? { ...c, tracks: c.tracks.filter((t) => t.id !== trackId) }
-          : c,
-      ),
-    })),
+    removeTrack: (clipId, trackId) =>
+      editClip(clipId, (c) => ({
+        ...c,
+        tracks: c.tracks.filter((t) => t.id !== trackId),
+      })),
 
-  setKeyframe: (clipId: string, trackId: string, keyframe: AnimationKeyframe) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== clipId) return c;
+    setKeyframe: (clipId, trackId, keyframe) =>
+      editTrack(clipId, trackId, (t) => {
+        const exists = t.keyframes.some((k) => k.time === keyframe.time);
         return {
-          ...c,
-          tracks: c.tracks.map((t) => {
-            if (t.id !== trackId) return t;
-            const existing = t.keyframes.find(
-              (k) => k.time === keyframe.time,
-            );
-            if (existing)
-              return {
-                ...t,
-                keyframes: t.keyframes.map((k) =>
-                  k.time === keyframe.time ? keyframe : k,
-                ),
-              };
-            return {
-              ...t,
-              keyframes: [...t.keyframes, keyframe].sort(
-                (a, b) => a.time - b.time,
-              ),
-            };
-          }),
+          ...t,
+          keyframes: exists
+            ? t.keyframes.map((k) => (k.time === keyframe.time ? keyframe : k))
+            : [...t.keyframes, keyframe].sort(byTime),
         };
       }),
-    })),
 
-  addKeyframeAt: (clipId: string, trackId: string, time: number) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== clipId) return c;
+    addKeyframeAt: (clipId, trackId, time) =>
+      editTrack(clipId, trackId, (tr, c) => {
         const t = roundTime(Math.min(c.length, Math.max(0, time)));
-        return {
-          ...c,
-          tracks: c.tracks.map((tr) => {
-            if (tr.id !== trackId) return tr;
-            if (tr.keyframes.some((k) => k.time === t)) return tr;
-            const before = [...tr.keyframes].reverse().find((k) => k.time < t);
-            const src = before ?? tr.keyframes[0];
-            const kf: AnimationKeyframe = src
-              ? cloneChannels(src, t)
-              : { time: t, rotation: [0, 0, 0] };
-            return {
-              ...tr,
-              keyframes: [...tr.keyframes, kf].sort((a, b) => a.time - b.time),
-            };
-          }),
-        };
+        if (tr.keyframes.some((k) => k.time === t)) return tr;
+        const before = [...tr.keyframes].reverse().find((k) => k.time < t);
+        const src = before ?? tr.keyframes[0];
+        const kf: AnimationKeyframe = src
+          ? cloneChannels(src, t)
+          : { time: t, rotation: [0, 0, 0] };
+        return { ...tr, keyframes: [...tr.keyframes, kf].sort(byTime) };
       }),
-    })),
 
-  duplicateKeyframe: (clipId: string, trackId: string, fromTime: number, toTime: number) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== clipId) return c;
+    duplicateKeyframe: (clipId, trackId, fromTime, toTime) =>
+      editTrack(clipId, trackId, (tr, c) => {
         const to = roundTime(Math.min(c.length, Math.max(0, toTime)));
+        const src = tr.keyframes.find((k) => k.time === fromTime);
+        if (!src || tr.keyframes.some((k) => k.time === to)) return tr;
         return {
-          ...c,
-          tracks: c.tracks.map((tr) => {
-            if (tr.id !== trackId) return tr;
-            const src = tr.keyframes.find((k) => k.time === fromTime);
-            if (!src || tr.keyframes.some((k) => k.time === to)) return tr;
-            return {
-              ...tr,
-              keyframes: [...tr.keyframes, cloneChannels(src, to)].sort(
-                (a, b) => a.time - b.time,
-              ),
-            };
-          }),
+          ...tr,
+          keyframes: [...tr.keyframes, cloneChannels(src, to)].sort(byTime),
         };
       }),
-    })),
 
-  moveKeyframe: (clipId: string, trackId: string, fromTime: number, toTime: number) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== clipId) return c;
+    moveKeyframe: (clipId, trackId, fromTime, toTime) =>
+      editTrack(clipId, trackId, (tr, c) => {
         const to = roundTime(Math.min(c.length, Math.max(0, toTime)));
+        if (to === fromTime) return tr;
+        if (tr.keyframes.some((k) => k.time === to)) return tr;
         return {
-          ...c,
-          tracks: c.tracks.map((tr) => {
-            if (tr.id !== trackId) return tr;
-            if (to === fromTime) return tr;
-            if (tr.keyframes.some((k) => k.time === to)) return tr;
-            return {
-              ...tr,
-              keyframes: tr.keyframes
-                .map((k) => (k.time === fromTime ? { ...k, time: to } : k))
-                .sort((a, b) => a.time - b.time),
-            };
-          }),
+          ...tr,
+          keyframes: tr.keyframes
+            .map((k) => (k.time === fromTime ? { ...k, time: to } : k))
+            .sort(byTime),
         };
       }),
-    })),
 
-  removeKeyframe: (clipId: string, trackId: string, time: number) =>
-    set((state) => ({
-      animationClips: state.animationClips.map((c) => {
-        if (c.id !== clipId) return c;
+    removeKeyframe: (clipId, trackId, time) =>
+      editTrack(clipId, trackId, (t) => ({
+        ...t,
+        keyframes: t.keyframes.filter((k) => k.time !== time),
+      })),
+
+    play: () =>
+      set((s) => {
+        // Pressing Play at the end restarts instead of doing nothing.
+        const atEnd = s.playback.time >= playbackEnd(s);
+        const time = atEnd ? 0 : s.playback.time;
         return {
-          ...c,
-          tracks: c.tracks.map((t) => {
-            if (t.id !== trackId) return t;
-            return {
-              ...t,
-              keyframes: t.keyframes.filter((k) => k.time !== time),
-            };
-          }),
+          playback: { ...s.playback, playing: true, time },
+          timeline: { ...s.timeline, playhead: time },
         };
       }),
-    })),
-
-  play: () =>
-    set((s) => {
-      // Pressing Play at the end restarts instead of doing nothing.
-      const atEnd = s.playback.time >= playbackEnd(s);
-      const time = atEnd ? 0 : s.playback.time;
-      return {
-        playback: { ...s.playback, playing: true, time },
-        timeline: { ...s.timeline, playhead: time },
-      };
-    }),
-  pause: () => set((s) => ({ playback: { ...s.playback, playing: false } })),
-  togglePlay: () => {
-    if (get().playback.playing) get().pause();
-    else get().play();
-  },
-  seek: (time: number) => get().setPlayhead(time),
-  setSpeed: (speed: number) =>
-    set((s) => ({
-      playback: { ...s.playback, speed: Math.min(8, Math.max(0.05, speed)) },
-    })),
-  tick: (dt: number) =>
-    set((s) => {
-      if (!s.playback.playing) return {};
-      const clip = s.animationClips.find(
-        (c) => c.id === s.selectedAnimationClipId,
-      );
-      const end = clip ? clip.length : s.timeline.duration;
-      let time = s.playback.time + dt * s.playback.speed;
-      let playing = true;
-      if (time >= end) {
-        if (clip?.loop && end > 0) {
-          time = time % end;
-        } else {
-          // Stop on the last frame of the clip.
-          time = end;
-          playing = false;
+    pause: () => set((s) => ({ playback: { ...s.playback, playing: false } })),
+    togglePlay: () => {
+      if (get().playback.playing) get().pause();
+      else get().play();
+    },
+    seek: (time) => get().setPlayhead(time),
+    setSpeed: (speed) =>
+      set((s) => ({
+        playback: { ...s.playback, speed: Math.min(8, Math.max(0.05, speed)) },
+      })),
+    tick: (dt) =>
+      set((s) => {
+        if (!s.playback.playing) return {};
+        const clip = s.animationClips.find((c) => c.id === s.selectedAnimationClipId);
+        const end = clip ? clip.length : s.timeline.duration;
+        let time = s.playback.time + dt * s.playback.speed;
+        let playing = true;
+        if (time >= end) {
+          if (clip?.loopMode === "loop" && end > 0) {
+            time = time % end;
+          } else {
+            // Stop on the last frame of the clip.
+            time = end;
+            playing = false;
+          }
         }
-      }
-      return {
-        playback: { ...s.playback, time, playing },
-        timeline: { ...s.timeline, playhead: time },
-      };
-    }),
+        return {
+          playback: { ...s.playback, time, playing },
+          timeline: { ...s.timeline, playhead: time },
+        };
+      }),
 
-  setTimelineDuration: (duration: number) =>
-    set((s) => ({
-      timeline: { ...s.timeline, duration: Math.max(0.1, duration) },
-    })),
-  setPlayhead: (time: number) =>
-    set((s) => {
-      const t = Math.max(0, time);
-      return {
-        playback: { ...s.playback, time: t },
-        timeline: { ...s.timeline, playhead: t },
-      };
-    }),
-  snapPlayhead: (time: number) => {
-    const step = Math.max(0.001, get().timeline.snapSeconds);
-    const snapped = Math.max(0, Math.round(time / step) * step);
-    // Trim float noise (0.15000000000000002 -> 0.15).
-    get().setPlayhead(Number(snapped.toFixed(4)));
-  },
-  setSnapSeconds: (snap: number) =>
-    set((s) => ({
-      timeline: { ...s.timeline, snapSeconds: Math.max(0.01, snap) },
-    })),
-  movePlayheadToStartOfSelectedClip: () =>
-    set((s) => {
-      return {
+    setTimelineDuration: (duration) =>
+      set((s) => ({
+        timeline: { ...s.timeline, duration: Math.max(0.1, duration) },
+      })),
+    setPlayhead: (time) =>
+      set((s) => {
+        const t = Math.max(0, time);
+        return {
+          playback: { ...s.playback, time: t },
+          timeline: { ...s.timeline, playhead: t },
+        };
+      }),
+    snapPlayhead: (time) => {
+      const step = Math.max(0.001, get().timeline.snapSeconds);
+      const snapped = Math.max(0, Math.round(time / step) * step);
+      // Trim float noise (0.15000000000000002 -> 0.15).
+      get().setPlayhead(Number(snapped.toFixed(4)));
+    },
+    setSnapSeconds: (snap) =>
+      set((s) => ({
+        timeline: { ...s.timeline, snapSeconds: Math.max(0.01, snap) },
+      })),
+    movePlayheadToStartOfSelectedClip: () =>
+      set((s) => ({
         playback: { ...s.playback, time: 0 },
         timeline: { ...s.timeline, playhead: 0 },
-      };
-    }),
-  movePlayheadToEndOfSelectedClip: () =>
-    set((s) => {
-      const clip =
-        s.selectedAnimationClipId != null
-          ? s.animationClips.find((c) => c.id === s.selectedAnimationClipId)
-          : null;
-      const maxTime =
-        clip != null ? Math.min(s.timeline.duration, clip.length) : 0;
-      return {
-        playback: { ...s.playback, time: maxTime },
-        timeline: { ...s.timeline, playhead: maxTime },
-      };
-    }),
-});
+      })),
+    movePlayheadToEndOfSelectedClip: () =>
+      set((s) => {
+        const clip =
+          s.selectedAnimationClipId != null
+            ? s.animationClips.find((c) => c.id === s.selectedAnimationClipId)
+            : null;
+        const maxTime =
+          clip != null ? Math.min(s.timeline.duration, clip.length) : 0;
+        return {
+          playback: { ...s.playback, time: maxTime },
+          timeline: { ...s.timeline, playhead: maxTime },
+        };
+      }),
+  };
+};

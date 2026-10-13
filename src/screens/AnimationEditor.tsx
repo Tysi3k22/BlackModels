@@ -8,7 +8,9 @@ import type {
   AnimationClip,
   AnimationKeyframe,
   AnimationTrack,
+  Channel,
   Interpolation,
+  LoopMode,
 } from "../stores/slices/animationSlice";
 
 const btn =
@@ -18,11 +20,93 @@ const selectCls =
 
 const SPEEDS = [0.25, 0.5, 1, 2];
 const SNAPS = [0.01, 0.05, 0.1, 0.25];
+const INTERPOLATIONS: Interpolation[] = ["linear", "catmullrom", "step"];
+const LOOP_MODES: LoopMode[] = ["once", "hold", "loop"];
+
+/**
+ * The playhead changes every frame while playing. Only the small components
+ * below subscribe to it, so the rest of the editor stays still during playback.
+ */
+const usePlayhead = () => useModel((s) => s.timeline.playhead);
+
+function PlayheadLine({ duration }: { duration: number }) {
+  const playhead = usePlayhead();
+  return (
+    <div
+      className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-accent shadow-sm"
+      style={{ left: `calc(${Math.min(100, (playhead / duration) * 100)}% - 1px)` }}
+    />
+  );
+}
+
+function Scrubber({
+  duration,
+  snapSeconds,
+  onChange,
+}: {
+  duration: number;
+  snapSeconds: number;
+  onChange: (t: number) => void;
+}) {
+  const playhead = usePlayhead();
+  return (
+    <input
+      type="range"
+      min={0}
+      max={duration}
+      step={snapSeconds}
+      value={Math.min(playhead, duration)}
+      onChange={(e) => onChange(parseFloat(e.target.value))}
+      className="absolute bottom-0 left-12 right-0 h-5 opacity-0 cursor-pointer"
+      aria-label="Timeline scrubber"
+    />
+  );
+}
+
+function PlayheadReadout({ clipLength }: { clipLength: number | null }) {
+  const t = usePlayhead();
+  return (
+    <div className="flex items-center gap-1 text-zinc-400">
+      <span className="tabular-nums">{t.toFixed(2)}s</span>
+      {clipLength != null ? (
+        <span className="text-zinc-500">/ {clipLength.toFixed(2)}s</span>
+      ) : null}
+    </div>
+  );
+}
+
+function PreviewHeader({ clipName }: { clipName: string | null }) {
+  const t = usePlayhead();
+  return (
+    <div className="flex h-8 shrink-0 items-center border-b border-border bg-panel px-3 text-[11px] font-semibold tracking-widest text-neutral-500">
+      3D PREVIEW
+      {clipName ? (
+        <span className="ml-2 font-normal normal-case tracking-normal text-neutral-400">
+          {clipName} · {t.toFixed(2)}s
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function AddKeyButton({ clipId, trackId }: { clipId: string; trackId: string }) {
+  const playhead = usePlayhead();
+  const addKeyframeAt = useModel((s) => s.addKeyframeAt);
+  return (
+    <button
+      type="button"
+      className={`${btn} ml-auto`}
+      onClick={() => addKeyframeAt(clipId, trackId, playhead)}
+      title="Add a keyframe at the playhead"
+    >
+      + Key @ {playhead.toFixed(2)}s
+    </button>
+  );
+}
 
 function Timeline(
   props: {
     duration: number;
-    playhead: number;
     snapSeconds: number;
     clips: readonly {
       id: string;
@@ -39,7 +123,6 @@ function Timeline(
 ) {
   const {
     duration,
-    playhead,
     snapSeconds,
     clips,
     selectedClipId,
@@ -128,22 +211,10 @@ function Timeline(
               />
             ))}
 
-          <div
-            className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-accent shadow-sm"
-            style={{ left: `calc(${Math.min(100, (playhead / duration) * 100)}% - 1px)` }}
-          />
+          <PlayheadLine duration={duration} />
         </div>
 
-        <input
-          type="range"
-          min={0}
-          max={duration}
-          step={snapSeconds}
-          value={Math.min(playhead, duration)}
-          onChange={(e) => onPlayheadDrag(parseFloat(e.target.value))}
-          className="absolute bottom-0 left-12 right-0 h-5 opacity-0 cursor-pointer"
-          aria-label="Timeline scrubber"
-        />
+        <Scrubber duration={duration} snapSeconds={snapSeconds} onChange={onPlayheadDrag} />
 
         <button
           type="button"
@@ -194,13 +265,17 @@ function ChannelEditor({
   label,
   value,
   initial,
+  interpolation,
   onChange,
+  onInterpolation,
   onRemove,
 }: {
   label: string;
   value: Vec3 | undefined;
   initial: Vec3;
+  interpolation: Interpolation;
   onChange: (v: Vec3 | undefined) => void;
+  onInterpolation: (m: Interpolation) => void;
   onRemove: () => void;
 }) {
   if (!value) {
@@ -216,14 +291,28 @@ function ChannelEditor({
       value={value}
       onChange={(v) => onChange(cleanVec(v))}
       postfix={
-        <button
-          type="button"
-          title={`Remove ${label} channel`}
-          onClick={onRemove}
-          className="rounded px-1 text-xs text-neutral-500 hover:bg-red-500/10 hover:text-red-400"
-        >
-          ✕
-        </button>
+        <>
+          <select
+            value={interpolation}
+            onChange={(e) => onInterpolation(e.target.value as Interpolation)}
+            title={`How ${label} blends into the next keyframe`}
+            className={selectCls}
+          >
+            {INTERPOLATIONS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            title={`Remove ${label} channel`}
+            onClick={onRemove}
+            className="rounded px-1 text-xs text-neutral-500 hover:bg-red-500/10 hover:text-red-400"
+          >
+            ✕
+          </button>
+        </>
       }
     />
   );
@@ -233,13 +322,11 @@ function KeyframeRow({
   clip,
   track,
   kf,
-  playhead,
   snapSeconds,
 }: {
   clip: AnimationClip;
   track: AnimationTrack;
   kf: AnimationKeyframe;
-  playhead: number;
   snapSeconds: number;
 }) {
   const setKeyframe = useModel((s) => s.setKeyframe);
@@ -250,16 +337,40 @@ function KeyframeRow({
 
   const patch = (changes: Partial<Omit<AnimationKeyframe, "time">>) => {
     const next: AnimationKeyframe = { ...kf, ...changes };
-    // Drop channels set to undefined so they disappear from the keyframe.
+    // Drop fields set to undefined so they disappear from the keyframe.
     (["position", "rotation", "scale", "interpolation"] as const).forEach((k) => {
       if (next[k] === undefined) delete next[k];
     });
     setKeyframe(clip.id, track.id, next);
   };
 
+  /** Only non-linear modes are stored; an empty map is dropped entirely. */
+  const withInterpolation = (ch: Channel, m: Interpolation | null) => {
+    const map = { ...(kf.interpolation ?? {}) };
+    if (m == null || m === "linear") delete map[ch];
+    else map[ch] = m;
+    return Object.keys(map).length > 0 ? map : undefined;
+  };
+
+  const channel = (ch: Channel, label: string, initial: Vec3) => (
+    <ChannelEditor
+      label={label}
+      value={kf[ch]}
+      initial={initial}
+      interpolation={kf.interpolation?.[ch] ?? "linear"}
+      onChange={(v) => patch({ [ch]: v })}
+      onInterpolation={(m) => patch({ interpolation: withInterpolation(ch, m) })}
+      onRemove={() => patch({ [ch]: undefined, interpolation: withInterpolation(ch, null) })}
+    />
+  );
+
   // Duplicate onto the playhead, or just after this keyframe if the playhead is on it.
-  const dupTarget =
-    Math.abs(playhead - kf.time) < 1e-6 ? kf.time + snapSeconds : playhead;
+  // The playhead is read at click time so this row does not re-render while playing.
+  const duplicate = () => {
+    const playhead = useModel.getState().timeline.playhead;
+    const target = Math.abs(playhead - kf.time) < 1e-6 ? kf.time + snapSeconds : playhead;
+    duplicateKeyframe(clip.id, track.id, kf.time, target);
+  };
 
   return (
     <div className="rounded border border-zinc-700 bg-zinc-800/60 px-2 py-1.5 text-zinc-200">
@@ -270,27 +381,13 @@ function KeyframeRow({
           onCommit={(n) => moveKeyframe(clip.id, track.id, kf.time, n)}
         />
         <span className="text-[10px] text-zinc-500">s</span>
-        <select
-          value={kf.interpolation ?? "linear"}
-          onChange={(e) =>
-            patch({ interpolation: e.target.value === "step" ? "step" : undefined })
-          }
-          title="Interpolation to the next keyframe"
-          className={selectCls}
-        >
-          {(["linear", "step"] as Interpolation[]).map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
         <button type="button" className={btn} onClick={() => setPlayhead(kf.time)} title="Move playhead here">
           Go to
         </button>
         <button
           type="button"
           className={btn}
-          onClick={() => duplicateKeyframe(clip.id, track.id, kf.time, dupTarget)}
+          onClick={duplicate}
           title="Copy this keyframe to the playhead"
         >
           Duplicate
@@ -305,27 +402,9 @@ function KeyframeRow({
         </button>
       </div>
       <div className="mt-1">
-        <ChannelEditor
-          label="Position"
-          value={kf.position}
-          initial={[0, 0, 0]}
-          onChange={(v) => patch({ position: v })}
-          onRemove={() => patch({ position: undefined })}
-        />
-        <ChannelEditor
-          label="Rotation"
-          value={kf.rotation}
-          initial={[0, 0, 0]}
-          onChange={(v) => patch({ rotation: v })}
-          onRemove={() => patch({ rotation: undefined })}
-        />
-        <ChannelEditor
-          label="Scale"
-          value={kf.scale}
-          initial={[1, 1, 1]}
-          onChange={(v) => patch({ scale: v })}
-          onRemove={() => patch({ scale: undefined })}
-        />
+        {channel("position", "Position", [0, 0, 0])}
+        {channel("rotation", "Rotation", [0, 0, 0])}
+        {channel("scale", "Scale", [1, 1, 1])}
       </div>
     </div>
   );
@@ -333,11 +412,9 @@ function KeyframeRow({
 
 function KeyframesPanel({
   clip,
-  playhead,
   snapSeconds,
 }: {
   clip: AnimationClip | null;
-  playhead: number;
   snapSeconds: number;
 }) {
   const bones = useModel((s) => s.bones);
@@ -346,7 +423,6 @@ function KeyframesPanel({
   const selectedKind = useModel((s) => s.selectedKind);
   const addTrackToClip = useModel((s) => s.addTrackToClip);
   const removeTrack = useModel((s) => s.removeTrack);
-  const addKeyframeAt = useModel((s) => s.addKeyframeAt);
 
   if (!clip) {
     return (
@@ -397,14 +473,7 @@ function KeyframesPanel({
                   {track.targetKind}
                 </span>
                 <span className="truncate text-zinc-300">{targetName(track)}</span>
-                <button
-                  type="button"
-                  className={`${btn} ml-auto`}
-                  onClick={() => addKeyframeAt(clip.id, track.id, playhead)}
-                  title="Add a keyframe at the playhead"
-                >
-                  + Key @ {playhead.toFixed(2)}s
-                </button>
+                <AddKeyButton clipId={clip.id} trackId={track.id} />
                 <button
                   type="button"
                   title="Remove track"
@@ -424,7 +493,6 @@ function KeyframesPanel({
                       clip={clip}
                       track={track}
                       kf={kf}
-                      playhead={playhead}
                       snapSeconds={snapSeconds}
                     />
                   ))}
@@ -443,9 +511,9 @@ export default function AnimationEditor() {
     clips,
     selectedClipId,
     playing,
-    time,
     speed,
-    timeline,
+    duration,
+    snapSeconds,
     timelineClipMap,
     togglePlay,
     pause,
@@ -463,17 +531,18 @@ export default function AnimationEditor() {
   const addClip = useModel((s) => s.addClip);
   const renameClip = useModel((s) => s.renameClip);
   const setClipLength = useModel((s) => s.setClipLength);
-  const setClipLoop = useModel((s) => s.setClipLoop);
+  const setClipLoopMode = useModel((s) => s.setClipLoopMode);
+  const setClipOverride = useModel((s) => s.setClipOverride);
 
   const activeClip = clips.find((c: AnimationClip) => c.id === selectedClipId) ?? null;
 
   // The timeline must always be long enough to show the longest clip.
   const longestClip = clips.reduce((m: number, c: AnimationClip) => Math.max(m, c.length), 0);
-  const timelineDuration = Math.max(timeline.duration, longestClip);
+  const timelineDuration = Math.max(duration, longestClip);
 
   useEffect(() => {
-    if (longestClip > timeline.duration) setTimelineDuration(longestClip);
-  }, [longestClip, timeline.duration, setTimelineDuration]);
+    if (longestClip > duration) setTimelineDuration(longestClip);
+  }, [longestClip, duration, setTimelineDuration]);
 
   // The playback loop lives in this screen, so leaving the tab stops playback.
   useEffect(() => () => pause(), [pause]);
@@ -508,14 +577,7 @@ export default function AnimationEditor() {
     <main className="flex min-h-0 w-full flex-1 flex-row items-stretch">
       {/* Left: live 3D preview of the selected clip */}
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex h-8 shrink-0 items-center border-b border-border bg-panel px-3 text-[11px] font-semibold tracking-widest text-neutral-500">
-          3D PREVIEW
-          {activeClip ? (
-            <span className="ml-2 font-normal normal-case tracking-normal text-neutral-400">
-              {activeClip.name} · {time.toFixed(2)}s
-            </span>
-          ) : null}
-        </div>
+        <PreviewHeader clipName={activeClip?.name ?? null} />
         <div className="relative min-h-0 flex-1">
           <ErrorBoundary label="The 3D preview">
             <EditorScene mode="animation" />
@@ -559,19 +621,12 @@ export default function AnimationEditor() {
             </button>
             <button
               type="button"
-              onClick={() => snapPlayhead(time)}
+              onClick={() => snapPlayhead(useModel.getState().timeline.playhead)}
               className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
             >
               Snap
             </button>
-            <div className="flex items-center gap-1 text-zinc-400">
-              <span className="tabular-nums">{time.toFixed(2)}s</span>
-              {activeClip ? (
-                <span className="text-zinc-500">
-                  / {activeClip.length.toFixed(2)}s
-                </span>
-              ) : null}
-            </div>
+            <PlayheadReadout clipLength={activeClip ? activeClip.length : null} />
 
             <label className="flex items-center gap-1 text-[10px] text-zinc-400">
               Speed
@@ -590,7 +645,7 @@ export default function AnimationEditor() {
             <label className="flex items-center gap-1 text-[10px] text-zinc-400">
               Snap step
               <select
-                value={SNAPS.includes(timeline.snapSeconds) ? timeline.snapSeconds : 0.05}
+                value={SNAPS.includes(snapSeconds) ? snapSeconds : 0.05}
                 onChange={(e) => setSnapSeconds(parseFloat(e.target.value))}
                 className={selectCls}
               >
@@ -601,19 +656,38 @@ export default function AnimationEditor() {
                 ))}
               </select>
             </label>
+            <label className="flex items-center gap-1 text-[10px] text-zinc-400">
+              Loop
+              <select
+                disabled={!activeClip}
+                value={activeClip?.loopMode ?? "once"}
+                onChange={(e) =>
+                  activeClip && setClipLoopMode(activeClip.id, e.target.value as LoopMode)
+                }
+                title="once: stop at the end · hold: stay on the last frame · loop: repeat"
+                className={`${selectCls} disabled:opacity-30`}
+              >
+                {LOOP_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label
               className={`flex items-center gap-1 text-[10px] select-none ${
                 activeClip ? "cursor-pointer text-zinc-300" : "text-zinc-600"
               }`}
+              title="Override: the clip replaces the default pose instead of blending with it"
             >
               <input
                 type="checkbox"
                 disabled={!activeClip}
-                checked={!!activeClip?.loop}
-                onChange={(e) => activeClip && setClipLoop(activeClip.id, e.target.checked)}
+                checked={!!activeClip?.override}
+                onChange={(e) => activeClip && setClipOverride(activeClip.id, e.target.checked)}
                 className="accent-[var(--color-accent,#4ea1ff)]"
               />
-              Loop
+              Override
             </label>
 
             <div className="ml-auto flex gap-2">
@@ -651,8 +725,7 @@ export default function AnimationEditor() {
 
           <Timeline
             duration={timelineDuration}
-            playhead={timeline.playhead}
-            snapSeconds={timeline.snapSeconds}
+            snapSeconds={snapSeconds}
             clips={timelineClipMap}
             selectedClipId={selectedClipId}
             keyframeTimes={keyframeTimes}
@@ -701,7 +774,9 @@ export default function AnimationEditor() {
                         className="flex items-center gap-1 text-zinc-400"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {clip.loop && <span title="Loops" className="text-[10px] text-accent">⟲</span>}
+                        {clip.loopMode === "loop" && (
+                          <span title="Loops" className="text-[10px] text-accent">⟲</span>
+                        )}
                         <span>{clip.length.toFixed(2)}s</span>
                         <button
                           type="button"
@@ -732,11 +807,7 @@ export default function AnimationEditor() {
             )}
           </div>
 
-          <KeyframesPanel
-            clip={activeClip}
-            playhead={timeline.playhead}
-            snapSeconds={timeline.snapSeconds}
-          />
+          <KeyframesPanel clip={activeClip} snapSeconds={snapSeconds} />
         </div>
       </aside>
     </main>

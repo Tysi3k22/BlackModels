@@ -160,7 +160,7 @@ Resource Pack / Plugin
 * [x] Keyframes
 * [x] Animation editor
 * [x] Animation preview
-* [ ] Animation import/export
+* [x] Animation import/export
 * [ ] AI animation generation
 
 ## Phase 5 — AI
@@ -231,22 +231,6 @@ npm run tauri dev
 # Long-Term Vision
 
 The long-term goal of BlockForge AI is to create a complete AI-assisted Minecraft asset creation environment.
-
-Instead of switching between multiple programs:
-
-```text
-Modeling Software
-       ↓
-Blockbench
-       ↓
-Texture Editor
-       ↓
-Animation Editor
-       ↓
-Resource Pack
-       ↓
-Minecraft Plugins
-```
 
 BlockForge aims to provide a unified workflow:
 

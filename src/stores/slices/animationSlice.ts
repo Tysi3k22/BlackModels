@@ -1,9 +1,13 @@
 import type { StateCreator } from "zustand";
 
+export type Interpolation = "linear" | "step";
+
 export interface AnimationClip {
   id: string;
   name: string;
   length: number; // seconds
+  /** When true, playback wraps around at the end instead of stopping. */
+  loop?: boolean;
   tracks: AnimationTrack[];
 }
 
@@ -19,6 +23,8 @@ export interface AnimationKeyframe {
   position?: [number, number, number];
   rotation?: [number, number, number];
   scale?: [number, number, number];
+  /** How to blend from this keyframe to the next one. Missing = "linear". */
+  interpolation?: Interpolation;
 }
 
 export interface PlaybackState {
@@ -48,7 +54,9 @@ export interface AnimationSliceActions {
   removeClip: (id: string) => void;
   selectClip: (id: string | null) => void;
   renameClip: (id: string, name: string) => void;
+  /** Never shorter than the clip's last keyframe, so no keyframe is cut off. */
   setClipLength: (id: string, length: number) => void;
+  setClipLoop: (id: string, loop: boolean) => void;
 
   addTrackToClip: (
     clipId: string,
@@ -68,6 +76,13 @@ export interface AnimationSliceActions {
    * when the track is empty. No-op if a keyframe already exists at that time.
    */
   addKeyframeAt: (clipId: string, trackId: string, time: number) => void;
+  /** Copy a keyframe (all channels + interpolation) to another time. No-op if occupied. */
+  duplicateKeyframe: (
+    clipId: string,
+    trackId: string,
+    fromTime: number,
+    toTime: number,
+  ) => void;
   /** Move a keyframe to a new time. No-op if another keyframe already sits there. */
   moveKeyframe: (
     clipId: string,
@@ -110,7 +125,14 @@ function cloneChannels(src: AnimationKeyframe, time: number): AnimationKeyframe 
   if (src.position) kf.position = [...src.position];
   if (src.rotation) kf.rotation = [...src.rotation];
   if (src.scale) kf.scale = [...src.scale];
+  if (src.interpolation) kf.interpolation = src.interpolation;
   return kf;
+}
+
+/** End of playback: the selected clip's length, or the whole timeline. */
+function playbackEnd(s: AnimationSliceState): number {
+  const clip = s.animationClips.find((c) => c.id === s.selectedAnimationClipId);
+  return clip ? clip.length : s.timeline.duration;
 }
 
 export const createAnimationSlice: StateCreator<
@@ -162,8 +184,20 @@ export const createAnimationSlice: StateCreator<
 
   setClipLength: (id: string, length: number) =>
     set((state) => ({
+      animationClips: state.animationClips.map((c) => {
+        if (c.id !== id) return c;
+        const lastKey = c.tracks.reduce(
+          (m, t) => t.keyframes.reduce((mm, k) => Math.max(mm, k.time), m),
+          0,
+        );
+        return { ...c, length: roundTime(Math.max(0.1, lastKey, length)) };
+      }),
+    })),
+
+  setClipLoop: (id: string, loop: boolean) =>
+    set((state) => ({
       animationClips: state.animationClips.map((c) =>
-        c.id === id ? { ...c, length: Math.max(0.1, length) } : c,
+        c.id === id ? { ...c, loop } : c,
       ),
     })),
 
@@ -251,6 +285,28 @@ export const createAnimationSlice: StateCreator<
       }),
     })),
 
+  duplicateKeyframe: (clipId: string, trackId: string, fromTime: number, toTime: number) =>
+    set((state) => ({
+      animationClips: state.animationClips.map((c) => {
+        if (c.id !== clipId) return c;
+        const to = roundTime(Math.min(c.length, Math.max(0, toTime)));
+        return {
+          ...c,
+          tracks: c.tracks.map((tr) => {
+            if (tr.id !== trackId) return tr;
+            const src = tr.keyframes.find((k) => k.time === fromTime);
+            if (!src || tr.keyframes.some((k) => k.time === to)) return tr;
+            return {
+              ...tr,
+              keyframes: [...tr.keyframes, cloneChannels(src, to)].sort(
+                (a, b) => a.time - b.time,
+              ),
+            };
+          }),
+        };
+      }),
+    })),
+
   moveKeyframe: (clipId: string, trackId: string, fromTime: number, toTime: number) =>
     set((state) => ({
       animationClips: state.animationClips.map((c) => {
@@ -290,12 +346,21 @@ export const createAnimationSlice: StateCreator<
       }),
     })),
 
-  play: () => set((s) => ({ playback: { ...s.playback, playing: true } })),
+  play: () =>
+    set((s) => {
+      // Pressing Play at the end restarts instead of doing nothing.
+      const atEnd = s.playback.time >= playbackEnd(s);
+      const time = atEnd ? 0 : s.playback.time;
+      return {
+        playback: { ...s.playback, playing: true, time },
+        timeline: { ...s.timeline, playhead: time },
+      };
+    }),
   pause: () => set((s) => ({ playback: { ...s.playback, playing: false } })),
-  togglePlay: () =>
-    set((s) => ({
-      playback: { ...s.playback, playing: !s.playback.playing },
-    })),
+  togglePlay: () => {
+    if (get().playback.playing) get().pause();
+    else get().play();
+  },
   seek: (time: number) => get().setPlayhead(time),
   setSpeed: (speed: number) =>
     set((s) => ({
@@ -311,9 +376,13 @@ export const createAnimationSlice: StateCreator<
       let time = s.playback.time + dt * s.playback.speed;
       let playing = true;
       if (time >= end) {
-        // Stop on the last frame of the clip.
-        time = end;
-        playing = false;
+        if (clip?.loop && end > 0) {
+          time = time % end;
+        } else {
+          // Stop on the last frame of the clip.
+          time = end;
+          playing = false;
+        }
       }
       return {
         playback: { ...s.playback, time, playing },

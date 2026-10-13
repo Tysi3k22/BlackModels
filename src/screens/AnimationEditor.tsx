@@ -6,10 +6,16 @@ import type {
   AnimationClip,
   AnimationKeyframe,
   AnimationTrack,
+  Interpolation,
 } from "../stores/slices/animationSlice";
 
 const btn =
   "rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px] disabled:pointer-events-none disabled:opacity-30";
+const selectCls =
+  "rounded border border-border bg-panel-2 px-1 py-0.5 text-[11px] text-neutral-200 outline-none focus:border-accent";
+
+const SPEEDS = [0.25, 0.5, 1, 2];
+const SNAPS = [0.01, 0.05, 0.1, 0.25];
 
 function Timeline(
   props: {
@@ -145,10 +151,6 @@ function Timeline(
           0s
         </button>
       </div>
-
-      <div className="flex items-center gap-3 text-zinc-400 text-[10px]">
-        <span>Snap: {snapSeconds.toFixed(2)}s</span>
-      </div>
     </div>
   );
 }
@@ -229,36 +231,67 @@ function KeyframeRow({
   clip,
   track,
   kf,
+  playhead,
+  snapSeconds,
 }: {
   clip: AnimationClip;
   track: AnimationTrack;
   kf: AnimationKeyframe;
+  playhead: number;
+  snapSeconds: number;
 }) {
   const setKeyframe = useModel((s) => s.setKeyframe);
   const moveKeyframe = useModel((s) => s.moveKeyframe);
+  const duplicateKeyframe = useModel((s) => s.duplicateKeyframe);
   const removeKeyframe = useModel((s) => s.removeKeyframe);
   const setPlayhead = useModel((s) => s.setPlayhead);
 
   const patch = (changes: Partial<Omit<AnimationKeyframe, "time">>) => {
     const next: AnimationKeyframe = { ...kf, ...changes };
     // Drop channels set to undefined so they disappear from the keyframe.
-    (["position", "rotation", "scale"] as const).forEach((k) => {
+    (["position", "rotation", "scale", "interpolation"] as const).forEach((k) => {
       if (next[k] === undefined) delete next[k];
     });
     setKeyframe(clip.id, track.id, next);
   };
 
+  // Duplicate onto the playhead, or just after this keyframe if the playhead is on it.
+  const dupTarget =
+    Math.abs(playhead - kf.time) < 1e-6 ? kf.time + snapSeconds : playhead;
+
   return (
     <div className="rounded border border-zinc-700 bg-zinc-800/60 px-2 py-1.5 text-zinc-200">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="size-2 shrink-0 rotate-45 bg-amber-400" />
         <TimeField
           value={kf.time}
           onCommit={(n) => moveKeyframe(clip.id, track.id, kf.time, n)}
         />
         <span className="text-[10px] text-zinc-500">s</span>
+        <select
+          value={kf.interpolation ?? "linear"}
+          onChange={(e) =>
+            patch({ interpolation: e.target.value === "step" ? "step" : undefined })
+          }
+          title="Interpolation to the next keyframe"
+          className={selectCls}
+        >
+          {(["linear", "step"] as Interpolation[]).map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
         <button type="button" className={btn} onClick={() => setPlayhead(kf.time)} title="Move playhead here">
           Go to
+        </button>
+        <button
+          type="button"
+          className={btn}
+          onClick={() => duplicateKeyframe(clip.id, track.id, kf.time, dupTarget)}
+          title="Copy this keyframe to the playhead"
+        >
+          Duplicate
         </button>
         <button
           type="button"
@@ -296,7 +329,15 @@ function KeyframeRow({
   );
 }
 
-function KeyframesPanel({ clip, playhead }: { clip: AnimationClip | null; playhead: number }) {
+function KeyframesPanel({
+  clip,
+  playhead,
+  snapSeconds,
+}: {
+  clip: AnimationClip | null;
+  playhead: number;
+  snapSeconds: number;
+}) {
   const bones = useModel((s) => s.bones);
   const cubes = useModel((s) => s.cubes);
   const selectedId = useModel((s) => s.selectedId);
@@ -376,7 +417,14 @@ function KeyframesPanel({ clip, playhead }: { clip: AnimationClip | null; playhe
               ) : (
                 <div className="flex flex-col gap-1">
                   {track.keyframes.map((kf) => (
-                    <KeyframeRow key={kf.time} clip={clip} track={track} kf={kf} />
+                    <KeyframeRow
+                      key={kf.time}
+                      clip={clip}
+                      track={track}
+                      kf={kf}
+                      playhead={playhead}
+                      snapSeconds={snapSeconds}
+                    />
                   ))}
                 </div>
               )}
@@ -394,12 +442,15 @@ export default function AnimationEditor() {
     selectedClipId,
     playing,
     time,
+    speed,
     timeline,
     timelineClipMap,
     togglePlay,
     seek,
     setPlayhead,
     snapPlayhead,
+    setSpeed,
+    setSnapSeconds,
     setTimelineDuration,
     movePlayheadToStartOfSelectedClip,
     movePlayheadToEndOfSelectedClip,
@@ -409,6 +460,7 @@ export default function AnimationEditor() {
   const addClip = useModel((s) => s.addClip);
   const renameClip = useModel((s) => s.renameClip);
   const setClipLength = useModel((s) => s.setClipLength);
+  const setClipLoop = useModel((s) => s.setClipLoop);
 
   const activeClip = clips.find((c: AnimationClip) => c.id === selectedClipId) ?? null;
 
@@ -419,6 +471,20 @@ export default function AnimationEditor() {
   useEffect(() => {
     if (longestClip > timeline.duration) setTimelineDuration(longestClip);
   }, [longestClip, timeline.duration, setTimelineDuration]);
+
+  // Space = play / pause (ignored while typing in a field).
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || el?.isContentEditable) return;
+      e.preventDefault();
+      togglePlay();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [togglePlay]);
 
   const handlePlayheadDrag = (t: number) => {
     const limit = activeClip ? activeClip.length : timelineDuration;
@@ -452,10 +518,11 @@ export default function AnimationEditor() {
       </div>
 
       <div className="flex flex-col gap-3 flex-1 rounded border border-border bg-[#1a1f26] p-3 text-xs">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={togglePlay}
+            title="Play / pause (Space)"
             className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700"
           >
             {playing ? "Pause" : "Play"}
@@ -475,6 +542,50 @@ export default function AnimationEditor() {
               </span>
             ) : null}
           </div>
+
+          <label className="flex items-center gap-1 text-[10px] text-zinc-400">
+            Speed
+            <select
+              value={SPEEDS.includes(speed) ? speed : 1}
+              onChange={(e) => setSpeed(parseFloat(e.target.value))}
+              className={selectCls}
+            >
+              {SPEEDS.map((s) => (
+                <option key={s} value={s}>
+                  {s}×
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-zinc-400">
+            Snap step
+            <select
+              value={SNAPS.includes(timeline.snapSeconds) ? timeline.snapSeconds : 0.05}
+              onChange={(e) => setSnapSeconds(parseFloat(e.target.value))}
+              className={selectCls}
+            >
+              {SNAPS.map((s) => (
+                <option key={s} value={s}>
+                  {s.toFixed(2)}s
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            className={`flex items-center gap-1 text-[10px] select-none ${
+              activeClip ? "cursor-pointer text-zinc-300" : "text-zinc-600"
+            }`}
+          >
+            <input
+              type="checkbox"
+              disabled={!activeClip}
+              checked={!!activeClip?.loop}
+              onChange={(e) => activeClip && setClipLoop(activeClip.id, e.target.checked)}
+              className="accent-[var(--color-accent,#4ea1ff)]"
+            />
+            Loop
+          </label>
+
           <div className="ml-auto flex gap-2">
             <button
               type="button"
@@ -536,29 +647,31 @@ export default function AnimationEditor() {
               {clips.map((clip: AnimationClip) => (
                 <div
                   key={clip.id}
+                  onClick={() => selectAnimationClip(clip.id)}
                   className={
-                    "rounded border bg-[#22262d] px-2 py-1 text-left transition-colors hover:bg-zinc-800/60 " +
+                    "cursor-pointer rounded border bg-[#22262d] px-2 py-1 text-left transition-colors hover:bg-zinc-800/60 " +
                     (selectedClipId === clip.id
                       ? "border-accent/80 bg-accent/20"
                       : "border-zinc-700")
                   }
                 >
                   <div className="flex items-center gap-2">
-                    <div
-                      className="flex-1 cursor-pointer font-medium text-zinc-200"
-                      onClick={() => selectAnimationClip(clip.id)}
-                      title="Select clip"
-                    >
-                      {clip.name}
-                    </div>
                     <input
                       key={clip.name}
                       type="text"
                       defaultValue={clip.name}
+                      onClick={(e) => e.stopPropagation()}
                       onBlur={(e) => renameClip(clip.id, e.currentTarget.value || clip.name)}
-                      className="w-32 bg-transparent border border-zinc-700 rounded px-1 py-0 text-zinc-200 text-xs focus:outline-none focus:border-accent/80"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      className="min-w-0 flex-1 bg-transparent border border-zinc-700 rounded px-1 py-0 text-zinc-200 text-xs focus:outline-none focus:border-accent/80"
                     />
-                    <div className="flex items-center gap-1 text-zinc-400">
+                    <div
+                      className="flex items-center gap-1 text-zinc-400"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {clip.loop && <span title="Loops" className="text-[10px] text-accent">⟲</span>}
                       <span>{clip.length.toFixed(2)}s</span>
                       <button
                         type="button"
@@ -589,7 +702,11 @@ export default function AnimationEditor() {
           )}
         </div>
 
-        <KeyframesPanel clip={activeClip} playhead={timeline.playhead} />
+        <KeyframesPanel
+          clip={activeClip}
+          playhead={timeline.playhead}
+          snapSeconds={timeline.snapSeconds}
+        />
       </div>
     </div>
   );

@@ -157,7 +157,7 @@ Resource Pack / Plugin
 
 ## Phase 4 — Animation
 * [x] Timeline
-* [ ] Keyframes
+* [x] Keyframes
 * [ ] Animation editor
 * [ ] Animation preview
 * [ ] Animation import/export

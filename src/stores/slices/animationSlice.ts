@@ -56,10 +56,24 @@ export interface AnimationSliceActions {
     targetKind: "cube" | "bone",
   ) => void;
   removeTrack: (clipId: string, trackId: string) => void;
+  /** Insert or replace the keyframe at `keyframe.time`. */
   setKeyframe: (
     clipId: string,
     trackId: string,
     keyframe: AnimationKeyframe,
+  ) => void;
+  /**
+   * Add a keyframe at `time` (clamped to the clip). It starts from a copy of the
+   * nearest earlier keyframe's channels (or the first one), or a zero rotation
+   * when the track is empty. No-op if a keyframe already exists at that time.
+   */
+  addKeyframeAt: (clipId: string, trackId: string, time: number) => void;
+  /** Move a keyframe to a new time. No-op if another keyframe already sits there. */
+  moveKeyframe: (
+    clipId: string,
+    trackId: string,
+    fromTime: number,
+    toTime: number,
   ) => void;
   removeKeyframe: (clipId: string, trackId: string, time: number) => void;
 
@@ -85,6 +99,18 @@ let idCounter = 0;
 function newId(prefix: string): string {
   idCounter += 1;
   return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+}
+
+/** Keyframe times are stored with 4 decimals so equality checks stay reliable. */
+const roundTime = (t: number): number => Number(t.toFixed(4));
+
+/** Copy a keyframe's channels to a new time (only the channels that exist). */
+function cloneChannels(src: AnimationKeyframe, time: number): AnimationKeyframe {
+  const kf: AnimationKeyframe = { time };
+  if (src.position) kf.position = [...src.position];
+  if (src.rotation) kf.rotation = [...src.rotation];
+  if (src.scale) kf.scale = [...src.scale];
+  return kf;
 }
 
 export const createAnimationSlice: StateCreator<
@@ -145,6 +171,8 @@ export const createAnimationSlice: StateCreator<
     set((state) => ({
       animationClips: state.animationClips.map((c) => {
         if (c.id !== clipId) return c;
+        // One track per target: a second one would just fight the first.
+        if (c.tracks.some((t) => t.targetId === targetId)) return c;
         const trackId = newId("track");
         return {
           ...c,
@@ -193,6 +221,52 @@ export const createAnimationSlice: StateCreator<
               keyframes: [...t.keyframes, keyframe].sort(
                 (a, b) => a.time - b.time,
               ),
+            };
+          }),
+        };
+      }),
+    })),
+
+  addKeyframeAt: (clipId: string, trackId: string, time: number) =>
+    set((state) => ({
+      animationClips: state.animationClips.map((c) => {
+        if (c.id !== clipId) return c;
+        const t = roundTime(Math.min(c.length, Math.max(0, time)));
+        return {
+          ...c,
+          tracks: c.tracks.map((tr) => {
+            if (tr.id !== trackId) return tr;
+            if (tr.keyframes.some((k) => k.time === t)) return tr;
+            const before = [...tr.keyframes].reverse().find((k) => k.time < t);
+            const src = before ?? tr.keyframes[0];
+            const kf: AnimationKeyframe = src
+              ? cloneChannels(src, t)
+              : { time: t, rotation: [0, 0, 0] };
+            return {
+              ...tr,
+              keyframes: [...tr.keyframes, kf].sort((a, b) => a.time - b.time),
+            };
+          }),
+        };
+      }),
+    })),
+
+  moveKeyframe: (clipId: string, trackId: string, fromTime: number, toTime: number) =>
+    set((state) => ({
+      animationClips: state.animationClips.map((c) => {
+        if (c.id !== clipId) return c;
+        const to = roundTime(Math.min(c.length, Math.max(0, toTime)));
+        return {
+          ...c,
+          tracks: c.tracks.map((tr) => {
+            if (tr.id !== trackId) return tr;
+            if (to === fromTime) return tr;
+            if (tr.keyframes.some((k) => k.time === to)) return tr;
+            return {
+              ...tr,
+              keyframes: tr.keyframes
+                .map((k) => (k.time === fromTime ? { ...k, time: to } : k))
+                .sort((a, b) => a.time - b.time),
             };
           }),
         };
@@ -290,4 +364,3 @@ export const createAnimationSlice: StateCreator<
       };
     }),
 });
-

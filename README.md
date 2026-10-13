@@ -158,8 +158,8 @@ Resource Pack / Plugin
 ## Phase 4 — Animation
 * [x] Timeline
 * [x] Keyframes
-* [ ] Animation editor
-* [ ] Animation preview
+* [x] Animation editor
+* [x] Animation preview
 * [ ] Animation import/export
 * [ ] AI animation generation
 

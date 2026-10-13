@@ -9,6 +9,7 @@ import {
   type Vec3,
 } from "../../stores/modelStore";
 import { getPaintContext, floodFillAt, paintLine, paintSquare } from "../../lib/paint";
+import { addVec, poseKey, sampleClip, type PoseMap } from "../../lib/animate";
 import { cubeMaterial } from "./CubeMaterial";
 import { PixelGridMaterial } from "./PixelGridMaterial";
 import { SelectedBone, SelectedCube } from "./SelectionRigs";
@@ -24,6 +25,18 @@ import {
 
 /** True in the Texture tab: every cube (also the selected one) is drawn in place inside its bone. */
 const TextureModeContext = createContext(false);
+
+const EMPTY_POSES: PoseMap = new Map();
+const ONE: Vec3 = [1, 1, 1];
+
+/**
+ * Animation preview state. `active` = Animation tab (no gizmo rigs, every cube
+ * drawn in place); `poses` = sampled pose of the selected clip at the playhead.
+ */
+const AnimationContext = createContext<{ active: boolean; poses: PoseMap }>({
+  active: false,
+  poses: EMPTY_POSES,
+});
 
 /**
  * Non-selected cube. Lives inside its bone's group, whose origin is the bone
@@ -62,6 +75,8 @@ function CubeObject({
   );
   const geometry = useCubeGeometry(cube, resolution);
   const textureMode = useContext(TextureModeContext);
+  const anim = useContext(AnimationContext);
+  const pose = anim.active ? anim.poses.get(poseKey("cube", cube.id)) : undefined;
   const stroke = useRef<{ last: [number, number] } | null>(null);
   /** UV under the pointer on this cube (texture mode) — drives the 3D brush cursor. */
   const [hoverUV, setHoverUV] = useState<[number, number] | null>(null);
@@ -69,12 +84,18 @@ function CubeObject({
   const effBrushSize = textureTool === "Pencil" ? 1 : textureBrushSize;
 
   // The selected cube is drawn by <SelectedCube/> (with gizmo) instead —
-  // except in texture mode, where it stays in its bone like every other cube.
-  if ((cube.id === selectedId && !forceVisible && !textureMode) || isCubeHidden(cube, bones)) return null;
+  // except in texture/animation mode, where it stays in its bone like every other cube.
+  if (
+    (cube.id === selectedId && !forceVisible && !textureMode && !anim.active) ||
+    isCubeHidden(cube, bones)
+  )
+    return null;
 
   const pivot: Vec3 = offset ?? [0, 0, 0];
   const o: Vec3 = cube.origin;
-  const groupPos: Vec3 = [o[0] - pivot[0], o[1] - pivot[1], o[2] - pivot[2]];
+  const baseGroupPos: Vec3 = [o[0] - pivot[0], o[1] - pivot[1], o[2] - pivot[2]];
+  const groupPos: Vec3 = pose?.position ? addVec(baseGroupPos, pose.position) : baseGroupPos;
+  const groupRot: Vec3 = pose?.rotation ? addVec(cube.rotation, pose.rotation) : cube.rotation;
   const meshPos: Vec3 = [
     (ifrom[0] + ito[0]) / 2 - o[0],
     (ifrom[1] + ito[1]) / 2 - o[1],
@@ -162,7 +183,8 @@ function CubeObject({
   return (
     <group
       position={groupPos}
-      rotation={eulerDeg(cube.rotation)}
+      rotation={eulerDeg(groupRot)}
+      scale={pose?.scale ?? ONE}
       onClick={(e) => {
         e.stopPropagation();
         select(cube.id, "cube");
@@ -196,7 +218,7 @@ function CubeObject({
         </mesh>
       )}
 
-      {textureMode && cube.id === selectedId && (
+      {(textureMode || anim.active) && cube.id === selectedId && (
         <lineSegments position={meshPos} scale={size}>
           <edgesGeometry args={[geometry]} />
           <lineBasicMaterial color="#fbbf24" depthTest={false} />
@@ -259,19 +281,23 @@ function BoneNode({
 }) {
   const select = useModel((s) => s.select);
   const showPivots = useApp((s) => s.showPivots);
+  const anim = useContext(AnimationContext);
+  const pose = anim.active ? anim.poses.get(poseKey("bone", bone.id)) : undefined;
   const childBones = tree.bonesByParent.get(bone.id) ?? EMPTY_BONES;
   const boneCubes = tree.cubesByBone.get(bone.id) ?? EMPTY_CUBES;
   // Bones use relative position to the parent's pivot (or absolute for roots)
   // and the full rotation from the file — the verified bbmodel semantics.
   const parent = bone.parentId ? tree.boneById.get(bone.parentId) : undefined;
-  const relPos: Vec3 = parent
+  const baseRelPos: Vec3 = parent
     ? [bone.origin[0] - parent.origin[0], bone.origin[1] - parent.origin[1], bone.origin[2] - parent.origin[2]]
     : bone.origin;
+  const relPos: Vec3 = pose?.position ? addVec(baseRelPos, pose.position) : baseRelPos;
+  const rot: Vec3 = pose?.rotation ? addVec(bone.rotation, pose.rotation) : bone.rotation;
 
   if (bone.hidden) return null;
 
   return (
-    <group position={relPos} rotation={eulerDeg(bone.rotation)}>
+    <group position={relPos} rotation={eulerDeg(rot)} scale={pose?.scale ?? ONE}>
       {/* Pivot markers: hidden by default (toggle in UI) */}
       {showPivots && (
         <>
@@ -317,39 +343,65 @@ function BoneNode({
   );
 }
 
-/** Renders the full scene graph: root cubes, bone trees, and the selection rig. */
-export function SceneContent({ textureMode }: { textureMode: boolean }) {
+/**
+ * Renders the full scene graph: root cubes, bone trees, and the selection rig.
+ * `animationMode` drops the gizmo rigs and applies the selected clip's pose at
+ * the playhead (read-only preview).
+ */
+export function SceneContent({
+  textureMode,
+  animationMode = false,
+}: {
+  textureMode: boolean;
+  animationMode?: boolean;
+}) {
   const cubes = useModel((s) => s.cubes);
   const bones = useModel((s) => s.bones);
   const textures = useModel((s) => s.textures);
   const resolution = useModel((s) => s.resolution);
+  // Only subscribe to the playhead in the Animation tab (it changes every frame while playing).
+  const time = useModel((s) => (animationMode ? s.playback.time : 0));
+  const clip = useModel((s) =>
+    animationMode
+      ? (s.animationClips.find((c) => c.id === s.selectedAnimationClipId) ?? null)
+      : null
+  );
 
   const tree = useMemo(() => buildSceneTree(cubes, bones), [cubes, bones]);
   const textureMap = useMemo(() => buildTextureMap(textures), [textures]);
+  const anim = useMemo(
+    () => ({
+      active: animationMode,
+      poses: clip ? sampleClip(clip, time) : EMPTY_POSES,
+    }),
+    [animationMode, clip, time]
+  );
   const { rootCubes, rootBones } = tree;
 
   return (
     <TextureModeContext.Provider value={textureMode}>
-      <group>
-        {rootCubes.map((cube) => (
-          <CubeObject key={cube.id} cube={cube} textures={textureMap} resolution={resolution} />
-        ))}
-        {rootBones.map((bone) => (
-          <BoneNode
-            key={bone.id}
-            bone={bone}
-            tree={tree}
-            textures={textureMap}
-            resolution={resolution}
-          />
-        ))}
-        {!textureMode && (
-          <>
-            <SelectedCube />
-            <SelectedBone />
-          </>
-        )}
-      </group>
+      <AnimationContext.Provider value={anim}>
+        <group>
+          {rootCubes.map((cube) => (
+            <CubeObject key={cube.id} cube={cube} textures={textureMap} resolution={resolution} />
+          ))}
+          {rootBones.map((bone) => (
+            <BoneNode
+              key={bone.id}
+              bone={bone}
+              tree={tree}
+              textures={textureMap}
+              resolution={resolution}
+            />
+          ))}
+          {!textureMode && !animationMode && (
+            <>
+              <SelectedCube />
+              <SelectedBone />
+            </>
+          )}
+        </group>
+      </AnimationContext.Provider>
     </TextureModeContext.Provider>
   );
 }

@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useAnimation } from "../hooks/useAnimation";
 import { useModel, type Vec3 } from "../stores/modelStore";
 import VecEditor from "../components/VecEditor";
+import ErrorBoundary from "../components/ErrorBoundary";
+import { EditorScene } from "../components/Viewport";
 import type {
   AnimationClip,
   AnimationKeyframe,
@@ -375,7 +377,7 @@ function KeyframesPanel({
           type="button"
           disabled={!canAddTrack}
           onClick={() => selectedId && selectedKind && addTrackToClip(clip.id, selectedId, selectedKind)}
-          title="Animate the cube/bone selected in the Model tab"
+          title="Animate the cube/bone selected in the Model tab (or clicked in the preview)"
           className={`${btn} ml-auto`}
         >
           + Track{selectedName ? `: ${selectedName}` : ""}
@@ -384,7 +386,7 @@ function KeyframesPanel({
 
       {clip.tracks.length === 0 ? (
         <div className="text-zinc-500">
-          No tracks yet. Select a bone or cube in the Model tab, then press “+ Track”.
+          No tracks yet. Select a bone or cube in the Model tab (or click a cube in the preview), then press “+ Track”.
         </div>
       ) : (
         <div className="flex max-h-80 flex-col gap-2 overflow-y-auto">
@@ -446,6 +448,7 @@ export default function AnimationEditor() {
     timeline,
     timelineClipMap,
     togglePlay,
+    pause,
     seek,
     setPlayhead,
     snapPlayhead,
@@ -471,6 +474,9 @@ export default function AnimationEditor() {
   useEffect(() => {
     if (longestClip > timeline.duration) setTimelineDuration(longestClip);
   }, [longestClip, timeline.duration, setTimelineDuration]);
+
+  // The playback loop lives in this screen, so leaving the tab stops playback.
+  useEffect(() => () => pause(), [pause]);
 
   // Space = play / pause (ignored while typing in a field).
   useEffect(() => {
@@ -499,215 +505,240 @@ export default function AnimationEditor() {
     : [];
 
   return (
-    <div className="flex flex-col h-full gap-2 px-3 pt-2 overflow-y-auto">
-      <div className="flex gap-4">
-        <button
-          type="button"
-          className="rounded border border-border bg-[#22262d] px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-          onClick={movePlayheadToStartOfSelectedClip}
-        >
-          ⏮ Start
-        </button>
-        <button
-          type="button"
-          className="rounded border border-border bg-[#22262d] px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-          onClick={movePlayheadToEndOfSelectedClip}
-        >
-          End ⏭
-        </button>
-      </div>
-
-      <div className="flex flex-col gap-3 flex-1 rounded border border-border bg-[#1a1f26] p-3 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={togglePlay}
-            title="Play / pause (Space)"
-            className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700"
-          >
-            {playing ? "Pause" : "Play"}
-          </button>
-          <button
-            type="button"
-            onClick={() => snapPlayhead(time)}
-            className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
-          >
-            Snap
-          </button>
-          <div className="flex items-center gap-1 text-zinc-400">
-            <span className="tabular-nums">{time.toFixed(2)}s</span>
-            {activeClip ? (
-              <span className="text-zinc-500">
-                / {activeClip.length.toFixed(2)}s
-              </span>
-            ) : null}
-          </div>
-
-          <label className="flex items-center gap-1 text-[10px] text-zinc-400">
-            Speed
-            <select
-              value={SPEEDS.includes(speed) ? speed : 1}
-              onChange={(e) => setSpeed(parseFloat(e.target.value))}
-              className={selectCls}
-            >
-              {SPEEDS.map((s) => (
-                <option key={s} value={s}>
-                  {s}×
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center gap-1 text-[10px] text-zinc-400">
-            Snap step
-            <select
-              value={SNAPS.includes(timeline.snapSeconds) ? timeline.snapSeconds : 0.05}
-              onChange={(e) => setSnapSeconds(parseFloat(e.target.value))}
-              className={selectCls}
-            >
-              {SNAPS.map((s) => (
-                <option key={s} value={s}>
-                  {s.toFixed(2)}s
-                </option>
-              ))}
-            </select>
-          </label>
-          <label
-            className={`flex items-center gap-1 text-[10px] select-none ${
-              activeClip ? "cursor-pointer text-zinc-300" : "text-zinc-600"
-            }`}
-          >
-            <input
-              type="checkbox"
-              disabled={!activeClip}
-              checked={!!activeClip?.loop}
-              onChange={(e) => activeClip && setClipLoop(activeClip.id, e.target.checked)}
-              className="accent-[var(--color-accent,#4ea1ff)]"
-            />
-            Loop
-          </label>
-
-          <div className="ml-auto flex gap-2">
-            <button
-              type="button"
-              onClick={() => addClip("New Clip", 1)}
-              className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
-            >
-              + Clip
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (activeClip) {
-                  setClipLength(activeClip.id, activeClip.length + 0.5);
-                }
-              }}
-              className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
-            >
-              + Length
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (activeClip) {
-                  removeClip(activeClip.id);
-                }
-              }}
-              className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
-            >
-              Delete Clip
-            </button>
-          </div>
+    <main className="flex min-h-0 w-full flex-1 flex-row items-stretch">
+      {/* Left: live 3D preview of the selected clip */}
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex h-8 shrink-0 items-center border-b border-border bg-panel px-3 text-[11px] font-semibold tracking-widest text-neutral-500">
+          3D PREVIEW
+          {activeClip ? (
+            <span className="ml-2 font-normal normal-case tracking-normal text-neutral-400">
+              {activeClip.name} · {time.toFixed(2)}s
+            </span>
+          ) : null}
         </div>
-
-        <Timeline
-          duration={timelineDuration}
-          playhead={timeline.playhead}
-          snapSeconds={timeline.snapSeconds}
-          clips={timelineClipMap}
-          selectedClipId={selectedClipId}
-          keyframeTimes={keyframeTimes}
-          onSelectClip={(id) => {
-            if (id === selectedClipId) {
-              seek(0);
-            } else {
-              selectAnimationClip(id);
-            }
-          }}
-          onPlayheadDrag={handlePlayheadDrag}
-        />
-
-        <div className="flex flex-col gap-1 text-zinc-400">
-          <div className="text-[10px] uppercase tracking-wider">Clips</div>
-          {clips.length === 0 ? (
-            <div className="rounded border border-border bg-[#22262d] py-6 text-center text-zinc-500">
-              No animation clips yet
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1">
-              {clips.map((clip: AnimationClip) => (
-                <div
-                  key={clip.id}
-                  onClick={() => selectAnimationClip(clip.id)}
-                  className={
-                    "cursor-pointer rounded border bg-[#22262d] px-2 py-1 text-left transition-colors hover:bg-zinc-800/60 " +
-                    (selectedClipId === clip.id
-                      ? "border-accent/80 bg-accent/20"
-                      : "border-zinc-700")
-                  }
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      key={clip.name}
-                      type="text"
-                      defaultValue={clip.name}
-                      onClick={(e) => e.stopPropagation()}
-                      onBlur={(e) => renameClip(clip.id, e.currentTarget.value || clip.name)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") e.currentTarget.blur();
-                      }}
-                      className="min-w-0 flex-1 bg-transparent border border-zinc-700 rounded px-1 py-0 text-zinc-200 text-xs focus:outline-none focus:border-accent/80"
-                    />
-                    <div
-                      className="flex items-center gap-1 text-zinc-400"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {clip.loop && <span title="Loops" className="text-[10px] text-accent">⟲</span>}
-                      <span>{clip.length.toFixed(2)}s</span>
-                      <button
-                        type="button"
-                        onClick={() => setClipLength(clip.id, clip.length + 0.5)}
-                        className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-zinc-700"
-                      >
-                        +
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setClipLength(clip.id, Math.max(0.1, clip.length - 0.5))}
-                        className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-zinc-700"
-                      >
-                        -
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeClip(clip.id)}
-                        className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-red-900/60 hover:text-red-300"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
+        <div className="relative min-h-0 flex-1">
+          <ErrorBoundary label="The 3D preview">
+            <EditorScene mode="animation" />
+          </ErrorBoundary>
+          {!activeClip && (
+            <div className="pointer-events-none absolute inset-x-0 top-3 text-center text-xs text-neutral-500">
+              Select or create a clip to preview it
             </div>
           )}
         </div>
+      </section>
 
-        <KeyframesPanel
-          clip={activeClip}
-          playhead={timeline.playhead}
-          snapSeconds={timeline.snapSeconds}
-        />
-      </div>
-    </div>
+      {/* Right: clips, timeline and keyframes */}
+      <aside className="flex w-[30rem] shrink-0 flex-col gap-2 overflow-y-auto border-l border-border px-3 pb-3 pt-2">
+        <div className="flex gap-4">
+          <button
+            type="button"
+            className="rounded border border-border bg-[#22262d] px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+            onClick={movePlayheadToStartOfSelectedClip}
+          >
+            ⏮ Start
+          </button>
+          <button
+            type="button"
+            className="rounded border border-border bg-[#22262d] px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+            onClick={movePlayheadToEndOfSelectedClip}
+          >
+            End ⏭
+          </button>
+        </div>
+
+        <div className="flex shrink-0 flex-col gap-3 rounded border border-border bg-[#1a1f26] p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={togglePlay}
+              title="Play / pause (Space)"
+              className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700"
+            >
+              {playing ? "Pause" : "Play"}
+            </button>
+            <button
+              type="button"
+              onClick={() => snapPlayhead(time)}
+              className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
+            >
+              Snap
+            </button>
+            <div className="flex items-center gap-1 text-zinc-400">
+              <span className="tabular-nums">{time.toFixed(2)}s</span>
+              {activeClip ? (
+                <span className="text-zinc-500">
+                  / {activeClip.length.toFixed(2)}s
+                </span>
+              ) : null}
+            </div>
+
+            <label className="flex items-center gap-1 text-[10px] text-zinc-400">
+              Speed
+              <select
+                value={SPEEDS.includes(speed) ? speed : 1}
+                onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                className={selectCls}
+              >
+                {SPEEDS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}×
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-[10px] text-zinc-400">
+              Snap step
+              <select
+                value={SNAPS.includes(timeline.snapSeconds) ? timeline.snapSeconds : 0.05}
+                onChange={(e) => setSnapSeconds(parseFloat(e.target.value))}
+                className={selectCls}
+              >
+                {SNAPS.map((s) => (
+                  <option key={s} value={s}>
+                    {s.toFixed(2)}s
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label
+              className={`flex items-center gap-1 text-[10px] select-none ${
+                activeClip ? "cursor-pointer text-zinc-300" : "text-zinc-600"
+              }`}
+            >
+              <input
+                type="checkbox"
+                disabled={!activeClip}
+                checked={!!activeClip?.loop}
+                onChange={(e) => activeClip && setClipLoop(activeClip.id, e.target.checked)}
+                className="accent-[var(--color-accent,#4ea1ff)]"
+              />
+              Loop
+            </label>
+
+            <div className="ml-auto flex gap-2">
+              <button
+                type="button"
+                onClick={() => addClip("New Clip", 1)}
+                className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
+              >
+                + Clip
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeClip) {
+                    setClipLength(activeClip.id, activeClip.length + 0.5);
+                  }
+                }}
+                className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
+              >
+                + Length
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeClip) {
+                    removeClip(activeClip.id);
+                  }
+                }}
+                className="rounded border border-border bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 text-[10px]"
+              >
+                Delete Clip
+              </button>
+            </div>
+          </div>
+
+          <Timeline
+            duration={timelineDuration}
+            playhead={timeline.playhead}
+            snapSeconds={timeline.snapSeconds}
+            clips={timelineClipMap}
+            selectedClipId={selectedClipId}
+            keyframeTimes={keyframeTimes}
+            onSelectClip={(id) => {
+              if (id === selectedClipId) {
+                seek(0);
+              } else {
+                selectAnimationClip(id);
+              }
+            }}
+            onPlayheadDrag={handlePlayheadDrag}
+          />
+
+          <div className="flex flex-col gap-1 text-zinc-400">
+            <div className="text-[10px] uppercase tracking-wider">Clips</div>
+            {clips.length === 0 ? (
+              <div className="rounded border border-border bg-[#22262d] py-6 text-center text-zinc-500">
+                No animation clips yet
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1">
+                {clips.map((clip: AnimationClip) => (
+                  <div
+                    key={clip.id}
+                    onClick={() => selectAnimationClip(clip.id)}
+                    className={
+                      "cursor-pointer rounded border bg-[#22262d] px-2 py-1 text-left transition-colors hover:bg-zinc-800/60 " +
+                      (selectedClipId === clip.id
+                        ? "border-accent/80 bg-accent/20"
+                        : "border-zinc-700")
+                    }
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        key={clip.name}
+                        type="text"
+                        defaultValue={clip.name}
+                        onClick={(e) => e.stopPropagation()}
+                        onBlur={(e) => renameClip(clip.id, e.currentTarget.value || clip.name)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.currentTarget.blur();
+                        }}
+                        className="min-w-0 flex-1 bg-transparent border border-zinc-700 rounded px-1 py-0 text-zinc-200 text-xs focus:outline-none focus:border-accent/80"
+                      />
+                      <div
+                        className="flex items-center gap-1 text-zinc-400"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {clip.loop && <span title="Loops" className="text-[10px] text-accent">⟲</span>}
+                        <span>{clip.length.toFixed(2)}s</span>
+                        <button
+                          type="button"
+                          onClick={() => setClipLength(clip.id, clip.length + 0.5)}
+                          className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-zinc-700"
+                        >
+                          +
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setClipLength(clip.id, Math.max(0.1, clip.length - 0.5))}
+                          className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-zinc-700"
+                        >
+                          -
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeClip(clip.id)}
+                          className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-red-900/60 hover:text-red-300"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <KeyframesPanel
+            clip={activeClip}
+            playhead={timeline.playhead}
+            snapSeconds={timeline.snapSeconds}
+          />
+        </div>
+      </aside>
+    </main>
   );
 }

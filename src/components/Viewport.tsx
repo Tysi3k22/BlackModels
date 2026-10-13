@@ -23,10 +23,11 @@ function DevSceneHook() {
 }
 
 /**
- * Shared scene for both editor modes. `mode = "model"` adds the transform
- * gizmo; `mode = "texture"` is a lighter orbit-view for texture painting.
+ * Shared scene for all editor modes. `mode = "model"` adds the transform
+ * gizmo; `mode = "texture"` is a lighter orbit-view for texture painting;
+ * `mode = "animation"` is a read-only orbit-view that plays the selected clip.
  */
-export function EditorScene({ mode }: { mode: "model" | "texture" }) {
+export function EditorScene({ mode }: { mode: "model" | "texture" | "animation" }) {
   const select = useModel((s) => s.select);
 
   // R3F can mount before the flex layout settles, freezing the canvas at the
@@ -66,7 +67,7 @@ export function EditorScene({ mode }: { mode: "model" | "texture" }) {
         infiniteGrid
       />
 
-      <SceneContent textureMode={mode === "texture"} />
+      <SceneContent textureMode={mode === "texture"} animationMode={mode === "animation"} />
       <DevSceneHook />
 
       <OrbitControls

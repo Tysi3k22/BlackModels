@@ -6,6 +6,20 @@ import TextureEditor from "./TextureEditor";
 import AnimationEditor from "./AnimationEditor";
 import { useModel } from "../stores/modelStore";
 
+function AIEditor() {
+    return (
+        <main className="flex min-h-0 w-full flex-1 items-center justify-center">
+            <div className="max-w-md rounded-lg border border-border bg-panel px-6 py-8 text-center">
+                <div className="mb-2 text-lg font-semibold text-neutral-200">AI tools</div>
+                <p className="text-sm leading-6 text-neutral-400">
+                    AI-assisted modeling is not available yet. Use the Model, Texture and
+                    Animation tabs to build your model in the meantime.
+                </p>
+            </div>
+        </main>
+    );
+}
+
 export default function EditorMenu() {
     const tab = useApp((state) => state.tab);
     const undo = useModel((s) => s.undo);
@@ -36,6 +50,7 @@ export default function EditorMenu() {
             {tab === "Model" && <ModelEditor />}
             {tab === "Texture" && <TextureEditor />}
             {tab === "Animation" && <AnimationEditor />}
+            {tab === "AI" && <AIEditor />}
         </main>
     )
 };

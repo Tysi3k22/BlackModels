@@ -1,12 +1,36 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg: #16171b;
-  --color-panel: #1e2025;
-  --color-panel-2: #25282e;
-  --color-border: #33363d;
+  --color-bg: #121317;
+  --color-panel: #1b1d22;
+  --color-panel-2: #262930;
+  --color-border: #31353d;
   --color-accent: #4ea1ff;
+  --color-glass: rgb(24 26 31 / 0.72);
 }
 
 html, body, #root { height: 100%; }
-body { @apply bg-bg text-neutral-200 select-none overflow-hidden; }
+body {
+  @apply bg-bg text-neutral-200 select-none overflow-hidden antialiased;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+input, button, select, textarea { font-family: inherit; }
+input, textarea { user-select: text; }
+
+* { scrollbar-width: thin; scrollbar-color: #3a3e47 transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #3a3e47; border-radius: 8px; }
+*::-webkit-scrollbar-thumb:hover { background: #4b505b; }
+
+input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+button:focus-visible,
+[role="button"]:focus-visible,
+select:focus-visible {
+  outline: 2px solid rgb(78 161 255 / 0.65);
+  outline-offset: 1px;
+}

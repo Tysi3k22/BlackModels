@@ -36,8 +36,18 @@ export default function ModelEditor() {
     }, [deleteSelected]);
 
     return (
-        <main className="flex min-h-0 w-full flex-1 flex-row items-stretch justify-start">
-            <div id="leftContainer" className="flex w-1/8 min-w-44 flex-col border-r border-border">
+        <main className="relative flex min-h-0 w-full flex-1 flex-row items-stretch justify-start">
+            {/* Viewport na całą szerokość, pod panelami */}
+            <div id="middleContainer" className="absolute inset-0">
+                <ErrorBoundary label="The 3D view">
+                    <Viewport />
+                </ErrorBoundary>
+            </div>
+
+            <div
+                id="leftContainer"
+                className="relative z-10 flex w-1/8 min-w-44 flex-col border-r border-white/10 bg-glass backdrop-blur-md"
+            >
                 <PanelTitle>Tools</PanelTitle>
                 {tools.map((tool) => (
                     <ToolButton
@@ -75,7 +85,7 @@ export default function ModelEditor() {
                     <button
                         onClick={() => addBone()}
                         title="Adds a bone under the selected bone (or at the model root)"
-                        className="rounded border border-border px-3 py-1.5 text-left text-sm text-neutral-200 transition-colors hover:bg-panel-2"
+                        className="rounded border border-white/10 px-3 py-1.5 text-left text-sm text-neutral-200 transition-colors hover:bg-panel-2/70"
                     >
                         + Add Bone
                     </button>
@@ -89,16 +99,15 @@ export default function ModelEditor() {
                 </div>
             </div>
 
+            {/* Pusty środek przepuszcza kliknięcia do sceny */}
+            <div className="pointer-events-none flex-1" />
 
-            <div id="middleContainer" className="relative flex min-h-0 w-full flex-col">
-                <ErrorBoundary label="The 3D view">
-                    <Viewport />
-                </ErrorBoundary>
-            </div>
-
-            <div id="rightContainer" className="flex w-1/8 min-w-44 flex-col border-l border-border">
+            <div
+                id="rightContainer"
+                className="relative z-10 flex w-1/8 min-w-44 flex-col border-l border-white/10 bg-glass backdrop-blur-md"
+            >
                 <OutlinerPanel />
             </div>
         </main>
     )
-} 
+}

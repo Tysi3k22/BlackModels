@@ -7,27 +7,17 @@ function transformErrorList(errors: string[] | null) {
   return errors ?? [];
 }
 
-function DotsButton({ title }: { title?: string }) {
-  return (
-    <button
-      type="button"
-      title={title ?? "More"}
-      className="shrink-0 rounded px-1 text-neutral-500 transition-colors hover:text-neutral-200"
-    >
-      <span className="leading-[9px] text-[10px]">⋮</span>
-    </button>
-  );
-}
 export default function SelectedDetailsPanel() {
+  // Both views describe the same selection; "Hierarchy" is about parenting,
+  // "Block info" about geometry. They are kept as two tabs but share the
+  // name/rename field so editing a name never depends on the active tab.
   type Tab = "hierarchy" | "block-info";
   const [tab, setTab] = useState<Tab>("block-info");
 
-  // If the whole app has a recent field-level transform error, surface it
-  // at the top of this component so the user sees it immediately.
   const errors = transformErrorList(useModel((s) => s.transformErrors));
 
   return (
-    <div className="flex flex-col rounded border border-border bg-[#22262d] p-1">
+    <div className="flex flex-col rounded border border-white/10 bg-black/20 p-1">
       {errors.length > 0 && (
         <div className="mb-1 rounded bg-red-900/30 px-2 py-1 text-[11px] leading-5 text-red-300">
           {errors.map((error, i) => (
@@ -38,17 +28,18 @@ export default function SelectedDetailsPanel() {
           ))}
         </div>
       )}
-      <div className="flex gap-1 border-b border-border px-1 pb-1">
+      <div className="flex gap-1 border-b border-white/10 px-1 pb-1">
         <button
           type="button"
-          onClick={() => setTab("hierarchy")}          className={`rounded-t px-2 text-[11px] font-medium tracking-wide text-neutral-400 hover:text-neutral-200 ${tab === "hierarchy" ? "bg-panel-2 text-white" : ""}`}
+          onClick={() => setTab("hierarchy")}
+          className={`rounded-t px-2 text-[11px] font-medium tracking-wide text-neutral-400 hover:text-neutral-200 ${tab === "hierarchy" ? "bg-panel-2/70 text-white" : ""}`}
         >
           Hierarchy
         </button>
         <button
           type="button"
           onClick={() => setTab("block-info")}
-          className={`rounded-t px-2 text-[11px] font-medium tracking-wide text-neutral-400 hover:text-neutral-200 ${tab === "block-info" ? "bg-panel-2 text-white" : ""}`}
+          className={`rounded-t px-2 text-[11px] font-medium tracking-wide text-neutral-400 hover:text-neutral-200 ${tab === "block-info" ? "bg-panel-2/70 text-white" : ""}`}
         >
           Block info
         </button>
@@ -99,8 +90,9 @@ function HierarchyTab() {
             type="text"
             value={name}
             onChange={(e) => renameSelected(e.target.value)}
-            className="rounded-md border border-border bg-[#22262d] px-2 py-1.5 text-sm text-white placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-accent/50"
+            className="rounded-md border border-border bg-panel-2 px-2 py-1.5 text-sm text-white placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-accent/50"
             placeholder="Name"
+            aria-label="Selected name"
           />
 
           {selectedCube && (
@@ -139,16 +131,15 @@ function HierarchyTab() {
                   setBoneParent(selectedBone!.id, e.target.value || null);
                 }
               }}
-              className="min-w-0 flex-1 rounded border border-border bg-[#22262d] px-1.5 py-1 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+              className="min-w-0 flex-1 rounded border border-border bg-panel-2 px-1.5 py-1 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
             >
               <option value="">model root</option>
-              {bones.map((bone) => (
+              {(selectedCube ? bones : boneParentOptions(selectedBone!, bones)).map((bone) => (
                 <option key={bone.id} value={bone.id}>
                   {bone.name}
                 </option>
               ))}
             </select>
-            <DotsButton />
           </div>
 
           <button
@@ -223,7 +214,7 @@ function CubeBlockInfo() {
       <select
         value={cube.boneId ?? ""}
         onChange={(e) => setCubeParent(cube.id, e.target.value || null)}
-        className="mt-1 rounded border border-border bg-[#22262d] px-1.5 py-1 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+        className="mt-1 rounded border border-border bg-panel-2 px-1.5 py-1 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
       >
         <option value="">model root</option>
         {bones.map((bone) => (
@@ -260,8 +251,9 @@ function BoneBlockInfo() {
         type="text"
         value={bone.name}
         onChange={(e) => renameSelected(e.target.value)}
-        className="rounded-md border border-border bg-[#22262d] px-2 py-1.5 text-sm text-white placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-accent/50"
+        className="rounded-md border border-border bg-panel-2 px-2 py-1.5 text-sm text-white placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-accent/50"
         placeholder="Name"
+        aria-label="Bone name"
       />
 
       <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-neutral-500">
@@ -273,7 +265,7 @@ function BoneBlockInfo() {
       <select
         value={parentId ?? ""}
         onChange={(e) => setBoneParent(bone.id, e.target.value || null)}
-        className="rounded border border-border bg-[#22262d] px-1.5 py-1 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+        className="rounded border border-border bg-panel-2 px-1.5 py-1 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
       >
         <option value="">model root</option>
         {boneParentOptions(bone, bones).map((bone) => (
@@ -305,4 +297,3 @@ function boneParentOptions(bone: Bone, bones: Bone[]) {
   }
   return bones.filter((candidate) => candidate.id !== bone.id && !invalid.has(candidate.id));
 }
-

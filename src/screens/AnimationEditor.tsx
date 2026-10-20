@@ -798,7 +798,7 @@ export default function AnimationEditor() {
                           className="rounded border border-zinc-700 bg-zinc-800 px-1 text-[10px] text-zinc-400 hover:bg-red-900/60 hover:text-red-300"
                         >
                           ✕
-                        </button>
+                        </button> 
                       </div>
                     </div>
                   </div>

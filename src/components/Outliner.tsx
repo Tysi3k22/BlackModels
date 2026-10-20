@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   Bone,
   Cube,
@@ -22,11 +22,19 @@ function EyeButton({
   return (
     <span
       role="button"
-      tabIndex={-1}
+      tabIndex={0}
+      aria-label={hidden ? "Show" : "Hide"}
       title={hidden ? "Show" : "Hide"}
       onClick={(e) => {
         e.stopPropagation();
         onToggle();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          onToggle();
+        }
       }}
       className={`ml-auto inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded hover:bg-panel-2 ${
         hidden ? "text-neutral-600" : dimmed ? "text-neutral-600" : "text-neutral-400 hover:text-neutral-100"
@@ -68,7 +76,6 @@ function BoneRow({
   ancestorHidden?: boolean;
   drop?: DropTargetCallbacks;
 }) {
-  const [open, setOpen] = useState(true);
   const selectedId = useModel((s) => s.selectedId);
   const select = useModel((s) => s.select);
   const toggleHidden = useModel((s) => s.toggleHidden);
@@ -77,13 +84,26 @@ function BoneRow({
   const boneCubes = tree.cubesByBone.get(bone.id) ?? EMPTY_CUBES;
   const selected = selectedId === bone.id;
   const hiddenHere = !!bone.hidden || ancestorHidden;
-
+  const hasChildren = childBones.length > 0 || boneCubes.length > 0;
   const isHovered = drop?.draggingOverBoneId === bone.id;
+
+  // Collapsible state lives on the row: the chevron is a real button, so the
+  // parent row is a plain div (nested buttons are invalid HTML and break a11y).
+  const [open, setOpen] = useStateSafe(true);
 
   return (
     <>
-      <button
+      <div
+        role="button"
+        tabIndex={0}
+        title={bone.name}
         onClick={() => select(bone.id, "bone")}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            select(bone.id, "bone");
+          }
+        }}
         onDragOver={(e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
@@ -101,7 +121,7 @@ function BoneRow({
           const cubeId = e.dataTransfer.getData("model/cube");
           if (cubeId && drop?.onDropCube) drop.onDropCube(cubeId);
         }}
-        className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm transition-colors ${
+        className={`flex w-full cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-left text-sm transition-colors ${
           selected
             ? "bg-accent/20 text-accent"
             : isHovered
@@ -110,19 +130,20 @@ function BoneRow({
         } ${hiddenHere ? "opacity-50" : ""}`}
         style={{ paddingLeft: `${8 + depth * 14}px` }}
       >
-        <span
-          role="button"
+        <button
+          type="button"
           tabIndex={-1}
+          aria-label={open ? "Collapse" : "Expand"}
           onClick={(e) => {
             e.stopPropagation();
             setOpen((o) => !o);
           }}
-          className={`inline-block w-3 shrink-0 text-center text-[10px] text-neutral-500 ${
-            childBones.length || boneCubes.length ? "cursor-pointer hover:text-neutral-300" : "invisible"
+          className={`inline-block w-3 shrink-0 rounded text-center text-[10px] text-neutral-500 ${
+            hasChildren ? "cursor-pointer hover:text-neutral-300" : "invisible"
           }`}
         >
           {open ? "▾" : "▸"}
-        </span>
+        </button>
         <span className="size-2.5 shrink-0 rotate-45 rounded-[2px] border" style={{ borderColor: bone.color }} />
         <span className="truncate">{bone.name}</span>
         <EyeButton
@@ -130,7 +151,7 @@ function BoneRow({
           dimmed={ancestorHidden}
           onToggle={() => toggleHidden(bone.id, "bone")}
         />
-      </button>
+      </div>
 
       {open && (
         <>
@@ -153,6 +174,15 @@ function BoneRow({
   );
 }
 
+/**
+ * Local collapsible state without importing useState at module scope is
+ * overkill; this is a tiny wrapper so the intent is readable.
+ */
+import { useState } from "react";
+function useStateSafe(initial: boolean) {
+  return useState(initial);
+}
+
 function CubeRow({
   cube,
   depth,
@@ -170,15 +200,25 @@ function CubeRow({
   const selected = selectedId === cube.id;
   const hiddenHere = !!cube.hidden || ancestorHidden;
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
+      title={cube.name}
       onClick={() => select(cube.id, "cube")}
-      draggable={draggable}        onDragStart={(e) => {
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          select(cube.id, "cube");
+        }
+      }}
+      draggable={draggable}
+      onDragStart={(e) => {
         if (!draggable) return;
-        try { e.dataTransfer.setData("model/cube", cube.id); } catch {} 
+        try { e.dataTransfer.setData("model/cube", cube.id); } catch {}
         e.dataTransfer.effectAllowed = "move";
         e.dataTransfer.setDragImage(new Image(), 0, 0);
       }}
-      className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm transition-colors ${
+      className={`flex w-full cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-left text-sm transition-colors ${
         selected ? "bg-accent/20 text-accent" : "text-neutral-300 hover:bg-panel-2"
       } ${hiddenHere ? "opacity-50" : ""}`}
       style={{ paddingLeft: `${8 + depth * 14 + 14}px` }}
@@ -190,7 +230,7 @@ function CubeRow({
         dimmed={ancestorHidden}
         onToggle={() => toggleHidden(cube.id, "cube")}
       />
-    </button>
+    </div>
   );
 }
 
@@ -229,12 +269,10 @@ export default function Outliner() {
   const selectedBone = useModel(selectSelectedBone);
   const selected = selectedCube ?? selectedBone;
 
-  const [draggingOverBoneId, setDraggingOverBoneId] = useState<string | null>(null);
-
   const drop: DropTargetCallbacks = {
     onDropCube: (cubeId) => setCubeParent(cubeId, null),
-    draggingOverBoneId,
-    setDraggingOverBoneId,
+    draggingOverBoneId: null,
+    setDraggingOverBoneId: () => {},
   };
 
   return (
@@ -282,5 +320,3 @@ export default function Outliner() {
     </>
   );
 }
-
-

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Vec3 } from "../stores/modelStore";
 
 interface VecEditorProps {
@@ -6,58 +6,91 @@ interface VecEditorProps {
   value: Vec3;
   onChange: (value: Vec3) => void;
   colors?: [string, string, string];
-  postfix?: React.ReactNode;
+  postfix?: ReactNode;
 }
+
+const AXES = ["X", "Y", "Z"] as const;
+const fmt = (n: number) => String(+n.toFixed(4));
 
 export default function VecEditor({
   label,
-  value: [vx, vy, vz],
+  value,
   onChange,
   colors = ["#ff5f56", "#7dd87d", "#5b8def"],
   postfix,
 }: VecEditorProps) {
-  const [draft, setDraft] = useState<Vec3>([vx, vy, vz]);
+  const [vx, vy, vz] = value;
+  const [draft, setDraft] = useState<string[]>([fmt(vx), fmt(vy), fmt(vz)]);
 
-  useEffect(() => setDraft([vx, vy, vz]), [vx, vy, vz]);
+  useEffect(() => setDraft([fmt(vx), fmt(vy), fmt(vz)]), [vx, vy, vz]);
 
-  const commit = () => onChange(draft);
-  const channel: Array<"X" | "Y" | "Z"> = ["X", "Y", "Z"];
+  /** Drafts -> numbers; untouched or invalid fields keep their current value. */
+  const resolve = (): Vec3 => {
+    const cur: Vec3 = [vx, vy, vz];
+    return cur.map((c, i) => {
+      if (draft[i] === fmt(c)) return c;
+      const n = parseFloat(draft[i].replace(",", "."));
+      return Number.isFinite(n) ? n : c;
+    }) as Vec3;
+  };
+
+  const commit = () => {
+    const next = resolve();
+    setDraft(next.map(fmt));
+    if (next[0] !== vx || next[1] !== vy || next[2] !== vz) onChange(next);
+  };
+
+  const nudge = (i: number, dir: 1 | -1, e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 10 : e.altKey ? 0.1 : 1;
+    const next = resolve();
+    next[i] = +(next[i] + dir * step).toFixed(4);
+    setDraft(next.map(fmt));
+    onChange(next);
+  };
 
   return (
-    <div className="mt-1">
-      {label && (
-        <div className="-mx-1 mb-0.5 text-[10px] uppercase tracking-widest text-neutral-500">
-          {label}
+    <div>
+      {label && <div className="mb-1 text-[11px] font-medium text-neutral-500">{label}</div>}
+      <div className="flex items-center gap-1.5">
+        <div className="grid min-w-0 flex-1 grid-cols-3 gap-1">
+          {AXES.map((axis, i) => (
+            <label
+              key={axis}
+              className="flex min-w-0 items-center overflow-hidden rounded-md border border-border bg-[#22262d] transition-colors focus-within:border-accent/60"
+            >
+              <span
+                className="flex w-4 shrink-0 items-center justify-center self-stretch text-[9px] font-bold text-black/80"
+                style={{ backgroundColor: colors[i] ?? "#999" }}
+              >
+                {axis}
+              </span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={draft[i]}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) =>
+                  setDraft((prev) => prev.map((s, j) => (j === i ? e.target.value : s)))
+                }
+                onBlur={commit}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  else if (e.key === "Escape") {
+                    setDraft([fmt(vx), fmt(vy), fmt(vz)]);
+                    e.currentTarget.blur();
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    nudge(i, 1, e);
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    nudge(i, -1, e);
+                  }
+                }}
+                className="w-full min-w-0 bg-transparent px-1.5 py-1 text-xs tabular-nums text-white outline-none"
+              />
+            </label>
+          ))}
         </div>
-      )}
-      <div className="flex flex-wrap items-center gap-1.5">
-        {channel.map((ch, i) => (
-          <span
-            key={ch}
-            className="inline-flex size-3 shrink-0 items-center justify-center rounded text-[9px] text-white font-bold"
-            style={{ backgroundColor: colors[i] ?? "#999" }}
-          >
-            {ch}
-          </span>
-        ))}
-        {draft.map((v, i) => (
-          <input
-            key={i}
-            type="number"
-            step="any"
-            inputMode="decimal"
-            value={String(v)}
-            onInput={(e) =>
-              setDraft((prev) => {
-                const next = [...prev] as Vec3;
-                next[i] = parseFloat(e.currentTarget.value ?? "0");
-                return next;
-              })
-            }
-            onBlur={commit}
-            className="min-w-[9ch] rounded-md border border-border bg-[#22262d] px-1.5 py-1 text-xs text-white placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-accent/50"
-          />
-        ))}
         {postfix ?? null}
       </div>
     </div>
